@@ -1,0 +1,35 @@
+name: Keep Streamlit App Awake
+
+on:
+  schedule:
+    # Run every 6 hours (0, 6, 12, 18 UTC)
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  ping-app:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Ping Streamlit App
+        run: |
+          echo "Pinging Streamlit app to keep it awake..."
+          # Replace YOUR_APP_URL with your actual Streamlit URL
+          curl -I https://your-app.streamlit.app || echo "Ping failed, but that's okay"
+          echo "Ping complete!"
+      
+      - name: Check Status
+        run: |
+          echo "App pinged at $(date)"
+          echo "Next ping in 6 hours"
+
+# Note: This workflow is OPTIONAL
+# - Streamlit free tier sleeps after 7 days of no activity
+# - If you use the app daily, you don't need this
+# - If you want guaranteed uptime, this helps
+# - Alternatively, use UptimeRobot (free) instead
+
+# To enable this workflow:
+# 1. Replace "your-app.streamlit.app" with your actual URL
+# 2. Commit and push to GitHub
+# 3. GitHub Actions will run automatically
