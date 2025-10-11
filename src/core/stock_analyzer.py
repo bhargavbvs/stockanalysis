@@ -683,6 +683,274 @@ class StockAnalyzer:
             logger.error(f"Error calculating S/R for {self.symbol} after {calc_time:.2f}s: {e}")
             return {'error': str(e)}
     
+    def calculate_risk_management(self, strategy_type, sr_data, analysis):
+        """
+        Calculate comprehensive risk management including stop-loss, take-profit, and trailing stops
+        
+        Args:
+            strategy_type (str): 'CALL' or 'PUT'
+            sr_data (dict): Support/resistance data from calculate_support_resistance()
+            analysis (dict): Full analysis data
+            
+        Returns:
+            dict: Risk management parameters including stops, targets, and trailing stop rules
+        """
+        start_time = time.time()
+        logger.info(f"Calculating risk management for {strategy_type} options on {self.symbol}...")
+        
+        try:
+            current_price = analysis['current_price']
+            
+            if strategy_type == 'CALL':
+                # === CALL OPTIONS RISK MANAGEMENT ===
+                
+                # 1. Initial Stop-Loss (for underlying stock price)
+                # Use nearest support level or 21 EMA, whichever is closer
+                support_levels = sr_data.get('support_levels', [])
+                nearest_support = support_levels[0] if support_levels else None
+                ema_21 = analysis.get('ema_21')
+                
+                # Choose the tighter stop (closer to current price for better risk management)
+                if nearest_support and ema_21:
+                    initial_stop = max(nearest_support, ema_21)
+                    stop_reason = f"Support level ${nearest_support}" if initial_stop == nearest_support else f"21 EMA ${ema_21}"
+                elif nearest_support:
+                    initial_stop = nearest_support
+                    stop_reason = f"Support level ${nearest_support}"
+                elif ema_21:
+                    initial_stop = ema_21
+                    stop_reason = f"21 EMA ${ema_21}"
+                else:
+                    # Fallback: 5% below current price
+                    initial_stop = current_price * 0.95
+                    stop_reason = "5% below entry"
+                
+                # For options: Typically use -25% to -50% of option premium as stop
+                option_stop_loss_percent = 30  # Lose max 30% of option premium
+                
+                # 2. Take-Profit Targets
+                resistance_levels = sr_data.get('resistance_levels', [])
+                
+                targets = []
+                if len(resistance_levels) >= 3:
+                    targets = [
+                        {
+                            'level': 1,
+                            'price': resistance_levels[0],
+                            'distance': f"{((resistance_levels[0] - current_price) / current_price * 100):.2f}%",
+                            'action': 'Take 33% profit',
+                            'option_gain': '50-100%'
+                        },
+                        {
+                            'level': 2,
+                            'price': resistance_levels[1],
+                            'distance': f"{((resistance_levels[1] - current_price) / current_price * 100):.2f}%",
+                            'action': 'Take 33% profit',
+                            'option_gain': '100-200%'
+                        },
+                        {
+                            'level': 3,
+                            'price': resistance_levels[2],
+                            'distance': f"{((resistance_levels[2] - current_price) / current_price * 100):.2f}%",
+                            'action': 'Close remaining position',
+                            'option_gain': '200%+'
+                        }
+                    ]
+                elif len(resistance_levels) >= 1:
+                    # Use available resistance levels and calculate others
+                    for i, r in enumerate(resistance_levels):
+                        targets.append({
+                            'level': i + 1,
+                            'price': r,
+                            'distance': f"{((r - current_price) / current_price * 100):.2f}%",
+                            'action': 'Take profit' if i == len(resistance_levels) - 1 else 'Partial profit',
+                            'option_gain': f"{50 * (i + 1)}-{100 * (i + 1)}%"
+                        })
+                else:
+                    # Calculate based on percentages if no resistance found
+                    targets = [
+                        {'level': 1, 'price': round(current_price * 1.03, 2), 'distance': '+3%', 'action': 'Take 33%', 'option_gain': '50-100%'},
+                        {'level': 2, 'price': round(current_price * 1.05, 2), 'distance': '+5%', 'action': 'Take 33%', 'option_gain': '100-200%'},
+                        {'level': 3, 'price': round(current_price * 1.08, 2), 'distance': '+8%', 'action': 'Close all', 'option_gain': '200%+'}
+                    ]
+                
+                # 3. Trailing Stop Rules
+                trailing_stops = [
+                    {
+                        'trigger': 'Option profit reaches 50%',
+                        'action': 'Move stop to breakeven (entry price)',
+                        'new_stop_price': current_price,
+                        'reason': 'Lock in risk-free trade'
+                    },
+                    {
+                        'trigger': 'Option profit reaches 100%',
+                        'action': 'Move stop to lock 50% profit',
+                        'new_stop_price': nearest_support if nearest_support and nearest_support > current_price * 1.01 else round(current_price * 1.02, 2),
+                        'reason': 'Protect 50% gains'
+                    },
+                    {
+                        'trigger': 'Option profit reaches 200%',
+                        'action': 'Trail stop at 34 EMA',
+                        'new_stop_price': analysis.get('ema_34'),
+                        'reason': 'Let winners run while protecting major gains'
+                    }
+                ]
+                
+                risk_reward_ratio = ((targets[0]['price'] - current_price) / (current_price - initial_stop)) if initial_stop < current_price else 0
+                
+                return {
+                    'strategy': 'BUY CALL OPTIONS',
+                    'entry_zone': {
+                        'price': current_price,
+                        'ideal_entry': f"${current_price} - ${round(current_price * 1.01, 2)}",
+                        'max_entry': f"${round(current_price * 1.02, 2)} (if strong momentum)"
+                    },
+                    'stop_loss': {
+                        'stock_price_stop': round(initial_stop, 2),
+                        'stop_distance': f"-{((current_price - initial_stop) / current_price * 100):.2f}%",
+                        'stop_reason': stop_reason,
+                        'option_stop': f"-{option_stop_loss_percent}% of option premium",
+                        'action': f"Exit if stock closes below ${round(initial_stop, 2)} OR option loses {option_stop_loss_percent}%"
+                    },
+                    'take_profit_targets': targets,
+                    'trailing_stops': trailing_stops,
+                    'risk_reward_ratio': f"1:{round(risk_reward_ratio, 2)}",
+                    'position_sizing': {
+                        'max_risk_per_trade': '2-3% of account',
+                        'suggested_allocation': 'Start with 1/3 position, add on confirmation',
+                        'max_option_risk': f"Risk only {option_stop_loss_percent}% of premium (${option_stop_loss_percent} per $100 invested)"
+                    },
+                    'calculation_time': f"{time.time() - start_time:.2f}s"
+                }
+                
+            elif strategy_type == 'PUT':
+                # === PUT OPTIONS RISK MANAGEMENT ===
+                
+                # 1. Initial Stop-Loss (for underlying stock price)
+                # Use nearest resistance level or 21 EMA, whichever is closer
+                resistance_levels = sr_data.get('resistance_levels', [])
+                nearest_resistance = resistance_levels[0] if resistance_levels else None
+                ema_21 = analysis.get('ema_21')
+                
+                # Choose the tighter stop (closer to current price)
+                if nearest_resistance and ema_21:
+                    initial_stop = min(nearest_resistance, ema_21)
+                    stop_reason = f"Resistance level ${nearest_resistance}" if initial_stop == nearest_resistance else f"21 EMA ${ema_21}"
+                elif nearest_resistance:
+                    initial_stop = nearest_resistance
+                    stop_reason = f"Resistance level ${nearest_resistance}"
+                elif ema_21:
+                    initial_stop = ema_21
+                    stop_reason = f"21 EMA ${ema_21}"
+                else:
+                    # Fallback: 5% above current price
+                    initial_stop = current_price * 1.05
+                    stop_reason = "5% above entry"
+                
+                option_stop_loss_percent = 30  # Lose max 30% of option premium
+                
+                # 2. Take-Profit Targets
+                support_levels = sr_data.get('support_levels', [])
+                
+                targets = []
+                if len(support_levels) >= 3:
+                    targets = [
+                        {
+                            'level': 1,
+                            'price': support_levels[0],
+                            'distance': f"{((current_price - support_levels[0]) / current_price * 100):.2f}%",
+                            'action': 'Take 33% profit',
+                            'option_gain': '50-100%'
+                        },
+                        {
+                            'level': 2,
+                            'price': support_levels[1],
+                            'distance': f"{((current_price - support_levels[1]) / current_price * 100):.2f}%",
+                            'action': 'Take 33% profit',
+                            'option_gain': '100-200%'
+                        },
+                        {
+                            'level': 3,
+                            'price': support_levels[2],
+                            'distance': f"{((current_price - support_levels[2]) / current_price * 100):.2f}%",
+                            'action': 'Close remaining position',
+                            'option_gain': '200%+'
+                        }
+                    ]
+                elif len(support_levels) >= 1:
+                    for i, s in enumerate(support_levels):
+                        targets.append({
+                            'level': i + 1,
+                            'price': s,
+                            'distance': f"{((current_price - s) / current_price * 100):.2f}%",
+                            'action': 'Take profit' if i == len(support_levels) - 1 else 'Partial profit',
+                            'option_gain': f"{50 * (i + 1)}-{100 * (i + 1)}%"
+                        })
+                else:
+                    # Calculate based on percentages
+                    targets = [
+                        {'level': 1, 'price': round(current_price * 0.97, 2), 'distance': '-3%', 'action': 'Take 33%', 'option_gain': '50-100%'},
+                        {'level': 2, 'price': round(current_price * 0.95, 2), 'distance': '-5%', 'action': 'Take 33%', 'option_gain': '100-200%'},
+                        {'level': 3, 'price': round(current_price * 0.92, 2), 'distance': '-8%', 'action': 'Close all', 'option_gain': '200%+'}
+                    ]
+                
+                # 3. Trailing Stop Rules for PUT options
+                trailing_stops = [
+                    {
+                        'trigger': 'Option profit reaches 50%',
+                        'action': 'Move stop to breakeven (entry price)',
+                        'new_stop_price': current_price,
+                        'reason': 'Lock in risk-free trade'
+                    },
+                    {
+                        'trigger': 'Option profit reaches 100%',
+                        'action': 'Move stop to lock 50% profit',
+                        'new_stop_price': nearest_resistance if nearest_resistance and nearest_resistance < current_price * 0.99 else round(current_price * 0.98, 2),
+                        'reason': 'Protect 50% gains'
+                    },
+                    {
+                        'trigger': 'Option profit reaches 200%',
+                        'action': 'Trail stop at 34 EMA',
+                        'new_stop_price': analysis.get('ema_34'),
+                        'reason': 'Let winners run while protecting major gains'
+                    }
+                ]
+                
+                risk_reward_ratio = ((current_price - targets[0]['price']) / (initial_stop - current_price)) if initial_stop > current_price else 0
+                
+                return {
+                    'strategy': 'BUY PUT OPTIONS',
+                    'entry_zone': {
+                        'price': current_price,
+                        'ideal_entry': f"${round(current_price * 0.99, 2)} - ${current_price}",
+                        'max_entry': f"${round(current_price * 0.98, 2)} (if strong breakdown)"
+                    },
+                    'stop_loss': {
+                        'stock_price_stop': round(initial_stop, 2),
+                        'stop_distance': f"+{((initial_stop - current_price) / current_price * 100):.2f}%",
+                        'stop_reason': stop_reason,
+                        'option_stop': f"-{option_stop_loss_percent}% of option premium",
+                        'action': f"Exit if stock closes above ${round(initial_stop, 2)} OR option loses {option_stop_loss_percent}%"
+                    },
+                    'take_profit_targets': targets,
+                    'trailing_stops': trailing_stops,
+                    'risk_reward_ratio': f"1:{round(risk_reward_ratio, 2)}",
+                    'position_sizing': {
+                        'max_risk_per_trade': '2-3% of account',
+                        'suggested_allocation': 'Start with 1/3 position, add on confirmation',
+                        'max_option_risk': f"Risk only {option_stop_loss_percent}% of premium (${option_stop_loss_percent} per $100 invested)"
+                    },
+                    'calculation_time': f"{time.time() - start_time:.2f}s"
+                }
+            
+            else:
+                return {'error': 'Invalid strategy type. Use CALL or PUT.'}
+                
+        except Exception as e:
+            calc_time = time.time() - start_time
+            logger.error(f"Error calculating risk management for {self.symbol} after {calc_time:.2f}s: {e}")
+            return {'error': str(e)}
+
     def identify_trend(self):
         """
         Identify if stock is in UPTREND or DOWNTREND and provide options trading recommendation
@@ -984,9 +1252,17 @@ class StockAnalyzer:
         logger.info(f"Calculating support/resistance levels for {self.symbol}...")
         sr_data = self.calculate_support_resistance()
         
-        # Add options recommendation and S/R data to analysis
+        # Calculate risk management if we have a CALL or PUT recommendation
+        risk_management = None
+        if "CALL" in trend or "BULLISH" in trend:
+            risk_management = self.calculate_risk_management('CALL', sr_data, analysis)
+        elif "PUT" in trend or "BEARISH" in trend:
+            risk_management = self.calculate_risk_management('PUT', sr_data, analysis)
+        
+        # Add options recommendation, S/R data, and risk management to analysis
         analysis['options_recommendation'] = options_recommendation
         analysis['support_resistance'] = sr_data
+        analysis['risk_management'] = risk_management
         
         # Log completion
         total_time = time.time() - start_time

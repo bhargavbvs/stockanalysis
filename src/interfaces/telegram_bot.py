@@ -296,6 +296,45 @@ def format_analysis_message(analysis, trend, reasons):
             message += f"  High: ${sr_data['52_week_high']}\n"
             message += f"  Low:  ${sr_data['52_week_low']}\n"
     
+    # Add risk management section
+    risk_mgmt = analysis.get('risk_management')
+    if risk_mgmt and 'stop_loss' in risk_mgmt:
+        message += "\n━━━━━━━━━━━━━━━━━━━━━━━━"
+        message += "\n🛡️ **RISK MANAGEMENT:**\n"
+        
+        # Entry zone
+        entry = risk_mgmt.get('entry_zone', {})
+        message += f"\n📍 **Entry Zone:**\n"
+        message += f"  Ideal: {entry.get('ideal_entry', 'N/A')}\n"
+        message += f"  Max:   {entry.get('max_entry', 'N/A')}\n"
+        
+        # Stop loss
+        stop = risk_mgmt.get('stop_loss', {})
+        message += f"\n🛑 **Stop Loss:**\n"
+        message += f"  Stock: ${stop.get('stock_price_stop', 'N/A')} ({stop.get('stop_distance', 'N/A')})\n"
+        message += f"  Option: {stop.get('option_stop', 'N/A')}\n"
+        message += f"  Why: {stop.get('stop_reason', 'N/A')}\n"
+        
+        # Take profit targets
+        targets = risk_mgmt.get('take_profit_targets', [])
+        if targets:
+            message += f"\n🎯 **Take Profit Targets:**\n"
+            for target in targets[:3]:
+                message += f"  T{target['level']}: ${target['price']} ({target['distance']}) - {target['action']}\n"
+                message += f"       Expected gain: {target['option_gain']}\n"
+        
+        # Trailing stops
+        trailing = risk_mgmt.get('trailing_stops', [])
+        if trailing:
+            message += f"\n📈 **Trailing Stop Rules:**\n"
+            for i, rule in enumerate(trailing[:3], 1):
+                message += f"  {i}. When {rule['trigger']}:\n"
+                message += f"     → {rule['action']}\n"
+        
+        # Risk/Reward
+        rr = risk_mgmt.get('risk_reward_ratio', 'N/A')
+        message += f"\n⚖️ **Risk/Reward:** {rr}\n"
+    
     # Add insights
     message += "\n━━━━━━━━━━━━━━━━━━━━━━━━"
     message += "\n💡 **Insights:**\n"
