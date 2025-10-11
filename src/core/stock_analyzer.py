@@ -2,6 +2,15 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import logging
+import time
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 class StockAnalyzer:
     def __init__(self, symbol):
@@ -14,6 +23,7 @@ class StockAnalyzer:
         self.symbol = symbol.upper()
         self.data = None
         self.ticker_info = None
+        logger.info(f"Initialized StockAnalyzer for {self.symbol}")
         
     def fetch_data(self, period='1y'):
         """
@@ -22,18 +32,30 @@ class StockAnalyzer:
         Args:
             period (str): Data period (default: '1y' for 1 year)
         """
+        start_time = time.time()
         try:
+            logger.info(f"Fetching data for {self.symbol}...")
             stock = yf.Ticker(self.symbol)
+            
+            fetch_start = time.time()
             self.data = stock.history(period=period)
+            fetch_time = time.time() - fetch_start
+            logger.info(f"Data fetch completed in {fetch_time:.2f}s")
+            
+            info_start = time.time()
             self.ticker_info = stock.info
+            info_time = time.time() - info_start
+            logger.info(f"Ticker info fetch completed in {info_time:.2f}s")
             
             if self.data.empty:
                 raise ValueError(f"No data found for symbol: {self.symbol}")
             
-            print(f"✓ Successfully fetched data for {self.symbol}")
+            total_time = time.time() - start_time
+            logger.info(f"✓ Successfully fetched data for {self.symbol} (Total: {total_time:.2f}s)")
             return True
         except Exception as e:
-            print(f"✗ Error fetching data: {e}")
+            total_time = time.time() - start_time
+            logger.error(f"✗ Error fetching data for {self.symbol} after {total_time:.2f}s: {e}")
             return False
     
     def calculate_ema(self, period):
@@ -519,6 +541,148 @@ class StockAnalyzer:
             'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     
+    def calculate_support_resistance(self, lookback_days=60, num_levels=3):
+        """
+        Calculate support and resistance levels using historical price data
+        
+        Args:
+            lookback_days (int): Number of days to look back (default: 60)
+            num_levels (int): Number of S/R levels to identify (default: 3)
+            
+        Returns:
+            dict: Support and resistance levels with additional data
+        """
+        start_time = time.time()
+        logger.info(f"Calculating support/resistance for {self.symbol}...")
+        
+        try:
+            if self.data is None or self.data.empty:
+                return {'error': 'No data available'}
+            
+            # Get recent data for analysis
+            recent_data = self.data.tail(lookback_days).copy()
+            current_price = recent_data['Close'].iloc[-1]
+            
+            # Method 1: Find pivot highs and lows
+            highs = []
+            lows = []
+            window = 5  # Look for pivots with 5-day window
+            
+            for i in range(window, len(recent_data) - window):
+                # Check if it's a pivot high
+                if recent_data['High'].iloc[i] == recent_data['High'].iloc[i-window:i+window+1].max():
+                    highs.append(recent_data['High'].iloc[i])
+                
+                # Check if it's a pivot low
+                if recent_data['Low'].iloc[i] == recent_data['Low'].iloc[i-window:i+window+1].min():
+                    lows.append(recent_data['Low'].iloc[i])
+            
+            # Method 2: Calculate pivot points (classic method)
+            latest_high = recent_data['High'].iloc[-1]
+            latest_low = recent_data['Low'].iloc[-1]
+            latest_close = recent_data['Close'].iloc[-1]
+            
+            pivot = (latest_high + latest_low + latest_close) / 3
+            
+            # Calculate support and resistance levels using pivot points
+            r1 = 2 * pivot - latest_low
+            r2 = pivot + (latest_high - latest_low)
+            r3 = r1 + (latest_high - latest_low)
+            
+            s1 = 2 * pivot - latest_high
+            s2 = pivot - (latest_high - latest_low)
+            s3 = s1 - (latest_high - latest_low)
+            
+            # Method 3: Cluster analysis of historical levels
+            # Group similar price levels together
+            def cluster_levels(levels, tolerance=0.02):
+                """Cluster similar price levels within tolerance"""
+                if not levels:
+                    return []
+                
+                levels = sorted(levels)
+                clusters = []
+                current_cluster = [levels[0]]
+                
+                for level in levels[1:]:
+                    if abs(level - np.mean(current_cluster)) / np.mean(current_cluster) < tolerance:
+                        current_cluster.append(level)
+                    else:
+                        clusters.append(np.mean(current_cluster))
+                        current_cluster = [level]
+                
+                clusters.append(np.mean(current_cluster))
+                return clusters
+            
+            # Cluster the pivot points
+            resistance_clusters = cluster_levels(highs)
+            support_clusters = cluster_levels(lows)
+            
+            # Get top resistance levels (above current price)
+            resistance_above = [r for r in resistance_clusters if r > current_price]
+            resistance_above = sorted(resistance_above)[:num_levels] if resistance_above else []
+            
+            # Get top support levels (below current price)
+            support_below = [s for s in support_clusters if s < current_price]
+            support_below = sorted(support_below, reverse=True)[:num_levels] if support_below else []
+            
+            # Calculate distances
+            def calc_distance(level):
+                return round(((level - current_price) / current_price) * 100, 2)
+            
+            # Add pivot-based levels if cluster analysis didn't find enough
+            pivot_resistance = sorted([r for r in [r1, r2, r3] if r > current_price])
+            pivot_support = sorted([s for s in [s1, s2, s3] if s < current_price], reverse=True)
+            
+            # Combine methods: use cluster analysis first, then fill with pivot points
+            final_resistance = resistance_above if len(resistance_above) >= num_levels else resistance_above + pivot_resistance
+            final_support = support_below if len(support_below) >= num_levels else support_below + pivot_support
+            
+            # Limit to requested number of levels
+            final_resistance = final_resistance[:num_levels]
+            final_support = final_support[:num_levels]
+            
+            # Calculate 52-week high/low as major S/R levels
+            high_52w = recent_data['High'].max()
+            low_52w = recent_data['Low'].min()
+            
+            calc_time = time.time() - start_time
+            logger.info(f"Support/Resistance calculation completed in {calc_time:.2f}s")
+            
+            result = {
+                'current_price': round(current_price, 2),
+                'pivot_point': round(pivot, 2),
+                
+                # Resistance levels (sorted nearest to farthest)
+                'resistance_levels': [round(r, 2) for r in final_resistance],
+                'resistance_distances': [f"{calc_distance(r):+.2f}%" for r in final_resistance],
+                
+                # Support levels (sorted nearest to farthest)
+                'support_levels': [round(s, 2) for s in final_support],
+                'support_distances': [f"{calc_distance(s):+.2f}%" for s in final_support],
+                
+                # Major levels
+                '52_week_high': round(high_52w, 2),
+                '52_week_low': round(low_52w, 2),
+                '52w_high_distance': f"{calc_distance(high_52w):+.2f}%",
+                '52w_low_distance': f"{calc_distance(low_52w):+.2f}%",
+                
+                # Nearest levels
+                'nearest_resistance': round(final_resistance[0], 2) if final_resistance else None,
+                'nearest_support': round(final_support[0], 2) if final_support else None,
+                
+                # Analysis metadata
+                'lookback_days': lookback_days,
+                'calculation_time': f"{calc_time:.2f}s"
+            }
+            
+            return result
+            
+        except Exception as e:
+            calc_time = time.time() - start_time
+            logger.error(f"Error calculating S/R for {self.symbol} after {calc_time:.2f}s: {e}")
+            return {'error': str(e)}
+    
     def identify_trend(self):
         """
         Identify if stock is in UPTREND or DOWNTREND and provide options trading recommendation
@@ -542,6 +706,9 @@ class StockAnalyzer:
         Returns:
             tuple: (str, list, dict, dict) - Trend type, reasons, additional checks, analysis data
         """
+        start_time = time.time()
+        logger.info(f"Starting trend analysis for {self.symbol}...")
+        
         analysis = self.analyze()
         
         if analysis is None:
@@ -813,8 +980,18 @@ class StockAnalyzer:
         # Add scoring summary
         reasons.append(f"\n📊 Criteria Score: BULLISH {original_criteria_met}/5 | BEARISH {bearish_criteria_met}/5 | Enhanced {additional_criteria_met}/7")
         
-        # Add options recommendation to analysis
+        # Calculate support/resistance levels
+        logger.info(f"Calculating support/resistance levels for {self.symbol}...")
+        sr_data = self.calculate_support_resistance()
+        
+        # Add options recommendation and S/R data to analysis
         analysis['options_recommendation'] = options_recommendation
+        analysis['support_resistance'] = sr_data
+        
+        # Log completion
+        total_time = time.time() - start_time
+        logger.info(f"✓ Trend analysis completed for {self.symbol} in {total_time:.2f}s - Result: {trend}")
+        logger.info(f"  Criteria met: Bullish {original_criteria_met}/5, Bearish {bearish_criteria_met}/5, Enhanced {additional_criteria_met}/7")
         
         return trend, reasons, additional_checks, analysis
 

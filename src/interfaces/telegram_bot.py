@@ -270,7 +270,34 @@ def format_analysis_message(analysis, trend, reasons):
                 if criteria_count >= 5:
                     break
     
+    # Add support/resistance levels
+    sr_data = analysis.get('support_resistance')
+    if sr_data and 'current_price' in sr_data:
+        message += "\n━━━━━━━━━━━━━━━━━━━━━━━━"
+        message += "\n🎯 **SUPPORT & RESISTANCE LEVELS:**\n"
+        message += f"  Current: ${sr_data['current_price']}\n"
+        message += f"  Pivot:   ${sr_data['pivot_point']}\n\n"
+        
+        message += "🔺 **Resistance Levels:**\n"
+        res_levels = sr_data.get('resistance_levels', [])
+        res_distances = sr_data.get('resistance_distances', [])
+        for i, (level, dist) in enumerate(zip(res_levels[:3], res_distances[:3])):
+            message += f"  R{i+1}: ${level} ({dist})\n"
+        
+        message += "\n🔻 **Support Levels:**\n"
+        sup_levels = sr_data.get('support_levels', [])
+        sup_distances = sr_data.get('support_distances', [])
+        for i, (level, dist) in enumerate(zip(sup_levels[:3], sup_distances[:3])):
+            message += f"  S{i+1}: ${level} ({dist})\n"
+        
+        # Add 52-week high/low if available
+        if '52_week_high' in sr_data:
+            message += f"\n📊 **52-Week Range:**\n"
+            message += f"  High: ${sr_data['52_week_high']}\n"
+            message += f"  Low:  ${sr_data['52_week_low']}\n"
+    
     # Add insights
+    message += "\n━━━━━━━━━━━━━━━━━━━━━━━━"
     message += "\n💡 **Insights:**\n"
     if analysis.get('is_bullish_stacked'):
         message += "• ✅ Perfect bullish EMA alignment\n"
@@ -282,6 +309,11 @@ def format_analysis_message(analysis, trend, reasons):
         message += "• 💡 RSI indicates oversold\n"
     if analysis['adx'] and analysis['adx'] >= 25:
         message += f"• ✅ Strong trend (ADX: {analysis['adx']})\n"
+    
+    # Add nearest S/R insight
+    if sr_data and 'nearest_resistance' in sr_data and 'nearest_support' in sr_data:
+        message += f"• 🎯 Nearest resistance: ${sr_data['nearest_resistance']}\n"
+        message += f"• 🛡️ Nearest support: ${sr_data['nearest_support']}\n"
     
     message += f"\n⏰ *As of {analysis['date']}*"
     message += "\n\n⚠️ *Not financial advice - for educational purposes only*"
