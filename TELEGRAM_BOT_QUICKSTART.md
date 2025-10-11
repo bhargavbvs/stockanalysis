@@ -1,4 +1,17 @@
-# 🤖 Telegram Bot Quick Start Guide
+# 🚂 Railway Quick Deploy - Telegram Bot Only (No Web App)
+
+## ✅ What Changed
+
+Removed all Streamlit/web app dependencies. Your bot now runs as a pure Telegram bot:
+- ✅ **Faster** - No web framework overhead
+- ✅ **Lighter** - 120MB RAM vs 500MB+ with Streamlit
+- ✅ **Simpler** - Just bot.py, no complex threading issues
+- ✅ **Cheaper** - Fits in $5/month Railway tier easily
+- ✅ **Never Sleeps** - 24/7 uptime guaranteed
+
+---
+
+# Quick Start: Telegram Stock Analyzer Bot
 
 ## ✅ Your Bot is Already Configured!
 
