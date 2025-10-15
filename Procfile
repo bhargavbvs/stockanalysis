@@ -1,1 +1,1 @@
-web: python bot.py
+worker: python stock_tracker.py

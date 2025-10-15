@@ -1,0 +1,4 @@
+# Procfile for Telegram Bot Service
+# Use this for the telegram-bot Railway service
+
+worker: python bot.py
