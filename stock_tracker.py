@@ -29,6 +29,7 @@ from typing import List, Dict, Optional
 import schedule
 import pytz
 from dotenv import load_dotenv
+import yfinance as yf
 
 # Load environment variables from .env file
 load_dotenv()
@@ -69,6 +70,9 @@ class StockTracker:
         
         # Set up timezone for market hours
         self.eastern = pytz.timezone('US/Eastern')
+        
+        # Track last earnings alert date
+        self.last_earnings_alert_date = None
         
         logger.info(f"Stock Tracker initialized with {len(self.watchlist)} stocks")
     
@@ -552,6 +556,192 @@ Confidence: {confidence}
         self.send_discord_alert(message)
         self.send_webhook_alert(result)
     
+    def get_earnings_date(self, symbol: str) -> Optional[datetime]:
+        """
+        Get the earnings date for a stock
+        
+        Args:
+            symbol: Stock ticker symbol
+            
+        Returns:
+            datetime of earnings date or None if not found
+        """
+        try:
+            import pandas as pd
+            from datetime import date
+            
+            stock = yf.Ticker(symbol)
+            
+            # Try to get earnings dates from calendar
+            if hasattr(stock, 'calendar') and stock.calendar is not None:
+                earnings_date = stock.calendar.get('Earnings Date')
+                if earnings_date is not None:
+                    # Handle if it's a list/array (sometimes gives a range)
+                    if hasattr(earnings_date, '__iter__') and not isinstance(earnings_date, str):
+                        earnings_date = earnings_date[0] if len(earnings_date) > 0 else None
+                    
+                    if earnings_date is not None:
+                        # Convert to datetime based on type
+                        if isinstance(earnings_date, date) and not isinstance(earnings_date, datetime):
+                            # It's a date object, convert to datetime
+                            return datetime.combine(earnings_date, datetime.min.time())
+                        elif hasattr(earnings_date, 'to_pydatetime'):
+                            # It's a pandas Timestamp
+                            return earnings_date.to_pydatetime()
+                        elif isinstance(earnings_date, datetime):
+                            return earnings_date
+            
+            # Alternative: Try earnings_dates attribute
+            if hasattr(stock, 'earnings_dates') and stock.earnings_dates is not None:
+                try:
+                    earnings_df = stock.earnings_dates
+                    if not earnings_df.empty:
+                        # Get the first future date
+                        future_dates = earnings_df[earnings_df.index > datetime.now()]
+                        if not future_dates.empty:
+                            return future_dates.index[0].to_pydatetime()
+                except Exception:
+                    pass
+            
+            return None
+        
+        except Exception as e:
+            logger.debug(f"Could not fetch earnings date for {symbol}: {e}")
+            return None
+    
+    def check_upcoming_earnings(self) -> List[Dict]:
+        """
+        Check which stocks in watchlist have earnings in the next 7 days
+        
+        Returns:
+            List of dicts with symbol and earnings date
+        """
+        logger.info("Checking for upcoming earnings...")
+        upcoming_earnings = []
+        now = datetime.now()
+        week_from_now = now + timedelta(days=7)
+        
+        for symbol in self.watchlist:
+            try:
+                earnings_date = self.get_earnings_date(symbol)
+                
+                if earnings_date:
+                    # Make earnings_date timezone-naive for comparison
+                    if earnings_date.tzinfo is not None:
+                        earnings_date = earnings_date.replace(tzinfo=None)
+                    
+                    # Check if earnings is within next 7 days
+                    if now <= earnings_date <= week_from_now:
+                        days_until = (earnings_date - now).days
+                        upcoming_earnings.append({
+                            'symbol': symbol,
+                            'earnings_date': earnings_date,
+                            'days_until': days_until
+                        })
+                        logger.info(f"{symbol} has earnings on {earnings_date.strftime('%Y-%m-%d')} ({days_until} days)")
+                
+                # Small delay to avoid rate limiting
+                time.sleep(0.5)
+            
+            except Exception as e:
+                logger.debug(f"Error checking earnings for {symbol}: {e}")
+                continue
+        
+        return upcoming_earnings
+    
+    def format_earnings_message(self, earnings_list: List[Dict]) -> str:
+        """
+        Format earnings alert message for all stocks in one message
+        
+        Args:
+            earnings_list: List of dicts with symbol and earnings info
+            
+        Returns:
+            Formatted message string
+        """
+        if not earnings_list:
+            return None
+        
+        # Sort by days until earnings
+        earnings_list.sort(key=lambda x: x['days_until'])
+        
+        message = "📅 **UPCOMING EARNINGS ALERT** 📅\n"
+        message += "=" * 40 + "\n\n"
+        message += f"Stocks with earnings in the next week:\n\n"
+        
+        for item in earnings_list:
+            symbol = item['symbol']
+            earnings_date = item['earnings_date']
+            days_until = item['days_until']
+            
+            # Format date
+            date_str = earnings_date.strftime('%A, %B %d, %Y')
+            
+            # Add emoji based on days until
+            if days_until == 0:
+                emoji = "🔴"
+                days_text = "TODAY"
+            elif days_until == 1:
+                emoji = "🟠"
+                days_text = "TOMORROW"
+            else:
+                emoji = "🟡"
+                days_text = f"in {days_until} days"
+            
+            message += f"{emoji} **{symbol}**\n"
+            message += f"   📆 {date_str}\n"
+            message += f"   ⏰ {days_text}\n\n"
+        
+        message += "=" * 40 + "\n"
+        message += f"Total: {len(earnings_list)} stock(s)\n"
+        message += f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        return message
+    
+    def send_daily_earnings_alert(self):
+        """
+        Send daily earnings alert in the morning before market open
+        Only sends once per day
+        """
+        now_et = datetime.now(self.eastern)
+        today_date = now_et.date()
+        
+        # Check if we already sent alert today
+        if self.last_earnings_alert_date == today_date:
+            logger.debug("Earnings alert already sent today")
+            return
+        
+        # Check if it's a weekday
+        if now_et.weekday() >= 5:  # Saturday or Sunday
+            logger.info("Weekend - skipping earnings alert")
+            return
+        
+        logger.info("Sending daily earnings alert...")
+        
+        # Get upcoming earnings
+        earnings_list = self.check_upcoming_earnings()
+        
+        if not earnings_list:
+            logger.info("No upcoming earnings in the next week")
+            self.last_earnings_alert_date = today_date
+            return
+        
+        # Format message
+        message = self.format_earnings_message(earnings_list)
+        
+        if message:
+            # Send to Telegram (and other channels if desired)
+            success = self.send_telegram_alert(message)
+            
+            if success:
+                logger.info(f"Earnings alert sent: {len(earnings_list)} stocks with upcoming earnings")
+                self.last_earnings_alert_date = today_date
+            else:
+                logger.warning("Failed to send earnings alert")
+        else:
+            logger.info("No earnings message to send")
+            self.last_earnings_alert_date = today_date
+    
     def scan_stocks(self):
         """
         Scan all stocks in watchlist and send alerts for signals
@@ -628,11 +818,19 @@ Confidence: {confidence}
         logger.info(f"Next scan: {datetime.now() + timedelta(minutes=interval_minutes)}")
         logger.info("="*80)
         
-        # Schedule the job
+        # Schedule the regular stock scan
         schedule.every(interval_minutes).minutes.do(self.scan_stocks)
+        
+        # Schedule daily earnings alert at 8:00 AM ET (before market open)
+        schedule.every().day.at("08:00").do(self.send_daily_earnings_alert)
         
         # Run first scan immediately
         self.scan_stocks()
+        
+        # Also run earnings check on startup if it's morning
+        now_et = datetime.now(self.eastern)
+        if now_et.hour >= 7 and now_et.hour < 9:  # Between 7 AM and 9 AM
+            self.send_daily_earnings_alert()
         
         # Keep running
         while True:
@@ -655,13 +853,23 @@ def main():
         action='store_true',
         help='Run a single scan and exit'
     )
+    parser.add_argument(
+        '--test-earnings',
+        action='store_true',
+        help='Test earnings alert and exit'
+    )
     
     args = parser.parse_args()
     
     # Create tracker
     tracker = StockTracker(config_file=args.config)
     
-    if args.once:
+    if args.test_earnings:
+        # Test earnings alert and exit
+        logger.info("Testing earnings alert...")
+        tracker.send_daily_earnings_alert()
+        logger.info("Test complete!")
+    elif args.once:
         # Run once and exit
         tracker.run_once()
     else:
