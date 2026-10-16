@@ -1,343 +1,137 @@
-# 📈 Stock Trend Analyzer - Telegram Bot
+# Stock Signal Bot
 
-A powerful Telegram bot for **Options Trading Analysis** using The Tao of Trading methodology with Fibonacci EMAs.
+Scans US stocks for Fibonacci-EMA pullback setups (The Tao of Trading style), checks them against the market regime, the economic calendar, earnings and the stock's sector, and sends alerts to **WhatsApp** (and/or Telegram, Discord, email, webhook). Every morning it sends a **brief**: market mood, what's coming up this week, what your stocks are doing, and an optional AI-written section on today's news, possible scenarios and a lesson of the day.
 
-💬 **Telegram Bot** | 📊 **Real-Time Analysis** | 🚀 **24/7 Uptime on Railway**
-
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app)
+> Educational tool, not financial advice. Results are on the underlying stock; options add strike, expiry and volatility risk.
 
 ---
 
-## 🎯 Features
+## How a signal is decided
 
-- **📞 CALL Options Signals** - Identifies bullish trends for buying call options
-- **📉 PUT Options Signals** - Identifies bearish trends for buying put options  
-- **💬 Telegram Bot** - Get instant analysis via Telegram from anywhere in the world
-- **✅ Context-Aware Criteria** - Shows bullish OR bearish criteria based on detected trend
-- **📊 Technical Analysis** - Fibonacci EMAs (5, 8, 13, 21, 34, 55, 89), RSI, Stochastic, ADX
-- **⚡ Always Online** - Runs 24/7 on Railway, never sleeps
-- **🌍 Global Access** - Works from any country, any device with Telegram
-- **🔄 Auto-Updates** - Push to GitHub = automatic redeployment
+Gates decide the direction. They must **all** pass:
 
----
+| Gate | CALL | PUT |
+|---|---|---|
+| EMA stack | 8 > 21 > 34 > 55 > 89 | 8 < 21 < 34 < 55 < 89 |
+| Trend | ADX(13) ≥ 20 **and** +DI > −DI | ADX(13) ≥ 20 **and** −DI > +DI |
+| Earnings | none within 14 days | same |
+| Macro events | no CPI / jobs / FOMC / bellwether earnings today or next session | same |
+| Market regime | not DEFENSIVE (see below) | – |
+| Sector | sector ETF not extended (RSI > 75 or > 20% above 50-day) and not breaking down (3 closes under a falling 21 EMA) | – |
 
-## 🚀 Quick Start
+**Entry triggers.** Both are needed for a SIGNAL; with only one, the stock is reported as a SETUP:
+- price within 2% of the 21 EMA (a pullback in an uptrend, or a rally into it in a downtrend)
+- slow stochastic (8,3,3) %K ≤ 40 for a CALL, ≥ 60 for a PUT
 
-### Use the Telegram Bot
+**Confidence** comes from five quality checks: price vs the 200 EMA, the 20/40/200 EMA order, the 200 EMA slope, RSI in range, and distance from the 52-week high (low for puts). If the earnings date can't be verified, confidence drops one level.
 
-1. **Open Telegram** on your phone or computer
-2. **Search** for your bot (username set with @BotFather)
-3. **Send** `/start` to begin
-4. **Send stock symbol** (e.g., `AAPL`, `TSLA`, `NVDA`)
-5. **Get instant analysis** with options recommendations!
+**Trade plan.** The stop sits past the 10-day swing low/high, clamped to 1–3 ATR so it is always on the correct side of the entry. Targets are 1R, 2R and 3R, with a time stop after 20 trading days. Position size comes from `ACCOUNT_SIZE × RISK_PER_TRADE_PCT`.
 
-### Example Usage:
+### Market regime score (0–5)
+One point each:
+1. SPY closes below its 50-day EMA
+2. VIX is above 25, or up more than 30% in 5 days
+3. VIX is above VIX3M (term structure inverted)
+4. The high-yield credit spread (FRED `BAMLH0A0HYM2`) is up more than 0.40 pts in 20 days
+5. The 10-yr yield is up more than 0.30 pts in 20 days, or Brent is up more than 20%
 
-```
-You: /start
+What the score does:
+- **0–1, NORMAL:** full size.
+- **2, CAUTION:** half size; CALLs need HIGH confidence.
+- **3–5, DEFENSIVE:** no new CALLs.
 
-Bot: 👋 Hi! Welcome to Stock Trend Analyzer Bot!
-     📈 Send me any stock symbol...
+Credit spreads and the yield/oil check tend to move *before* sell-offs. VIX mostly confirms them.
 
-You: AAPL
-
-Bot: 🚀 APPLE INC (AAPL) - $250.32
-     
-     📊 ANALYSIS
-     Trend: STRONG BULLISH ✅
-     Current Price: $250.32
-     21 EMA: $248.50 (within 0.73%)
-     
-     📞 OPTIONS RECOMMENDATION
-     Strategy: BUY CALL OPTIONS
-     Confidence: VERY HIGH
-     
-     Entry: When price confirms above $249
-     Risk: Stop-loss below $245 (-2.1%)
-     
-     ✅ BULLISH CRITERIA (5/5 met):
-     ✅ EMAs stacked bullishly (8>21>34>55>89)
-     ✅ Pullback to 21 EMA (within 2%)
-     ✅ Stochastic: 38 (oversold, good entry)
-     ✅ ADX: 24 (strong trend confirmed)
-     ✅ No earnings within 7 days
-```
+### Event calendar
+`events.yaml` lists CPI, jobs and FOMC dates plus deadlines you add yourself, such as tariff or truce dates. Earnings dates for the sector bellwethers in that file (NVDA, TSM, AVGO, …) are looked up automatically, and their veto applies only to stocks in that sector. **Keep the file current.**
 
 ---
 
-## 📋 What You Get
+## Setup
 
-### Options Trading Recommendations
+### 1. WhatsApp (CallMeBot, free for personal use)
+1. Save the CallMeBot WhatsApp number from [callmebot.com](https://www.callmebot.com) in your contacts. The number changes occasionally, so take it from the site.
+2. Send it: `I allow callmebot to send me messages`
+3. It replies with your API key. Set `WHATSAPP_PHONE=+1…` and `CALLMEBOT_API_KEY=…`.
 
-#### 📞 CALL Options (Bullish Signals)
-- **Strategy**: BUY CALL OPTIONS
-- **Confidence Levels**: VERY HIGH, HIGH, MODERATE, or LOW
-- **Entry Guidance**: Specific price levels and conditions
-- **Risk Management**: Stop-loss levels and position sizing
+Twilio is also supported (`WHATSAPP_PROVIDER=twilio`). WhatsApp only allows free-form business messages within 24 h of your last message to that number, so the daily brief needs you to reply now and then, or an approved template.
 
-#### 📉 PUT Options (Bearish Signals)
-- **Strategy**: BUY PUT OPTIONS  
-- **Confidence Levels**: VERY HIGH, HIGH, MODERATE, or LOW
-- **Entry Guidance**: Specific price levels and conditions
-- **Risk Management**: Stop-loss levels and position sizing
+### 2. Telegram (optional, needed for the interactive bot)
+Create a bot with @BotFather and set `TELEGRAM_BOT_TOKEN`. Send `/start` to it to see your chat id, then set `TELEGRAM_CHAT_ID` and `ALLOWED_CHAT_IDS`.
 
----
+### 3. AI section of the brief (optional)
+Set `ANTHROPIC_API_KEY` (from console.anthropic.com). Each brief makes one Claude call with up to `BRIEF_MAX_SEARCHES` web searches, which costs roughly $0.10–0.20 with the default `claude-sonnet-5-5`. Without a key the brief still has everything except the news, scenarios and lesson.
 
-## ✅ Analysis Criteria
+### 4. Your stocks
+`PORTFOLIO=NVDA:20@95,MSFT:5@410,TSLA` sets ticker, shares and average cost; shares and cost are optional. `WATCHLIST=…` holds the extra symbols to scan.
 
-The bot checks different criteria based on detected trend direction:
-
-### 📈 Bullish Criteria (for CALL Options)
-1. ✅ **EMAs Stacked Bullishly** - 8>21>34>55>89 (uptrend confirmed)
-2. ✅ **Pullback to Support** - Price within 2% of 21 EMA
-3. ✅ **Oversold Momentum** - Stochastic ≤40 (good entry point)
-4. ✅ **Strong Trend** - ADX ≥20 (trending market)
-5. ✅ **No Earnings Risk** - No earnings within 7 days
-
-**Signal**: When 4+ criteria met → **BUY CALL OPTIONS**
+All options are documented in [`.env.example`](.env.example).
 
 ---
 
-### 📉 Bearish Criteria (for PUT Options)
-1. ✅ **EMAs Stacked Bearishly** - 8<21<34<55<89 (downtrend confirmed)
-2. ✅ **Price Below Resistance** - Price below 21 EMA
-3. ✅ **Overbought Momentum** - Stochastic ≥60 (rally exhaustion)
-4. ✅ **Strong Trend** - ADX ≥20 (trending market)
-5. ✅ **No Earnings Risk** - No earnings within 7 days
-
-**Signal**: When 4+ criteria met → **BUY PUT OPTIONS**
-
----
-
-## 🚀 Deploy Your Own Bot
-
-### Prerequisites:
-1. GitHub account
-2. Railway account (free $5 credit)
-3. Telegram bot token from @BotFather
-
-### Deploy to Railway (5 minutes):
-
-**Step 1: Get Bot Token**
-1. Open Telegram, search for `@BotFather`
-2. Send `/newbot`
-3. Follow instructions, copy your bot token
-
-**Step 2: Deploy on Railway**
-1. Go to [railway.app](https://railway.app)
-2. Sign in with GitHub
-3. Click **"New Project"** → **"Deploy from GitHub repo"**
-4. Select this repository
-5. Add environment variable:
-   - Name: `TELEGRAM_BOT_TOKEN`
-   - Value: Your bot token from @BotFather
-6. Click **"Deploy"**
-
-**Step 3: Test**
-- Wait 2-3 minutes for deployment
-- Open Telegram, find your bot
-- Send `/start` and test with a stock symbol!
-
-**Full deployment guide**: See [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md)
-
----
-
-## 💻 Run Locally (Development)
+## Run
 
 ```bash
-# Clone repository
-git clone https://github.com/YOUR_USERNAME/stockanalysis.git
-cd stockanalysis
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
+cp .env.example .env              # fill in your keys
 
-# Set bot token
-export TELEGRAM_BOT_TOKEN="your_token_here"
+python stock_tracker.py --test    # send a test message to every channel
+python stock_tracker.py --brief   # send today's brief now  (--dry-run to just print it)
+python stock_tracker.py --once    # one scan now
+python stock_tracker.py           # run forever: brief at BRIEF_TIME + scans 9:30–16:15 ET
 
-# Run bot
-python bot.py
+python -m stockbot.bot            # interactive Telegram bot: /analyze NVDA, /market, /brief
+streamlit run app.py              # dashboard (pip install -r requirements-app.txt)
 ```
 
-Bot will start and listen for Telegram messages!
+### Deploy on Railway
+The repo is ready as is: `railway.json` runs `python stock_tracker.py`.
+1. New project → Deploy from GitHub → this repo.
+2. Add your variables (at least the WhatsApp ones and `PORTFOLIO`) under **Variables**.
+3. Optional: add a **Volume** mounted at `/app/data` and set `DATA_DIR=/app/data`, so alert history survives redeploys.
+4. To run the interactive Telegram bot as well, add a second service with start command `python -m stockbot.bot`.
+
+On a crash the process exits with code 1, so Railway restarts it, and you also get a WhatsApp/Telegram message about it.
 
 ---
 
-## 📂 Project Structure
+## Backtest
 
+```bash
+python -m stockbot.backtest --period 10y --compare          # effect of each filter layer
+python -m stockbot.backtest --symbols NVDA AMD --csv trades.csv
 ```
-stockanalysis/
-├── bot.py                          # Main entry point (Telegram bot)
-├── requirements.txt                # Python dependencies
-├── Procfile                        # Railway start command
-├── railway.json                    # Railway configuration
-├── runtime.txt                     # Python version (3.11)
-├── src/
-│   ├── core/
-│   │   ├── stock_analyzer.py      # Core analysis engine
-│   │   └── data_fetcher.py        # Yahoo Finance data fetcher
-│   ├── analysis/
-│   │   ├── indicators.py          # Technical indicators (RSI, Stochastic, ADX)
-│   │   ├── trend_analyzer.py      # Trend identification logic
-│   │   └── criteria_checkers.py   # Bullish/bearish criteria checks
-│   ├── interfaces/
-│   │   └── telegram_bot.py        # Telegram bot interface
-│   └── utils/
-│       └── output_formatter.py    # Pretty formatting
-└── docs/
-    ├── RAILWAY_DEPLOYMENT.md       # Complete deployment guide
-    ├── RAILWAY_BUILD_FIX.md        # Build troubleshooting
-    ├── OPTIONS_TRADING_GUIDE.md    # Options trading methodology
-    └── TAO_OF_TRADING_METHODOLOGY.md # Full trading methodology
+The backtest replays the exact live rules with no look-ahead. Signals are entered at the next day's open; the stop is checked before the target, and gaps fill at the open. It reports win rate, average R, profit factor, max drawdown in R, splits by direction, confidence and year, and the 10-day move after signals compared with any random day. Run it on your own symbols before trusting the filters.
+
+---
+
+## Tests
+```bash
+pip install -r requirements-dev.txt
+pytest -q
 ```
+CI runs the suite on every push. All tests use synthetic data; none touch the network.
 
----
-
-## 🛠️ Tech Stack
-
-- **Language**: Python 3.11
-- **Bot Framework**: python-telegram-bot
-- **Data Source**: Yahoo Finance (yfinance)
-- **Hosting**: Railway (always-on, $5/month)
-- **Data Processing**: pandas, numpy
-- **Indicators**: Custom implementations (RSI, Stochastic, ADX)
-
----
-
-## 📊 Technical Indicators
-
-### Fibonacci EMAs (5, 8, 13, 21, 34, 55, 89)
-- **Purpose**: Identify trend direction and strength
-- **Bullish**: Higher EMAs below lower EMAs (stacked bullishly)
-- **Bearish**: Higher EMAs above lower EMAs (stacked bearishly)
-
-### RSI (Relative Strength Index)
-- **Range**: 0-100
-- **Overbought**: >70 (potential reversal down)
-- **Oversold**: <30 (potential reversal up)
-
-### Stochastic Oscillator
-- **Range**: 0-100
-- **Bullish Entry**: ≤40 (pullback in uptrend)
-- **Bearish Entry**: ≥60 (rally in downtrend)
-
-### ADX (Average Directional Index)
-- **Range**: 0-100
-- **Strong Trend**: ≥25
-- **Minimum Trend**: ≥20
-- **Weak/No Trend**: <20
-
----
-
-## 💰 Pricing
-
-### Railway Hosting:
-- **First Month**: FREE ($5 credit included)
-- **After First Month**: $5/month
-- **Year 1**: $55 total
-
-### Compare to Alternatives:
-| Platform | Cost | Always-On | Speed |
-|----------|------|-----------|-------|
-| **Railway** ⭐ | $55/year | ✅ Yes | ⚡ Fast |
-| AWS EC2 | $120/year | ✅ Yes | ⚡ Fast |
-| DigitalOcean | $144/year | ✅ Yes | ⚡ Fast |
-| Render.com | $77/year | ✅ Yes | ⚡ Fast |
-| Heroku | $84/year | ✅ Yes | 🟡 OK |
-
-**Railway = Best value!** 🏆
-
----
-
-## 📈 Trading Methodology
-
-Based on **The Tao of Trading** by Simon Ree:
-
-1. **Fibonacci EMAs** - Multi-timeframe analysis using 5, 8, 13, 21, 34, 55, 89
-2. **Pullback Strategy** - Buy pullbacks in uptrends, sell rallies in downtrends
-3. **Momentum Confirmation** - Use Stochastic for precise entry timing
-4. **Trend Strength** - ADX confirms strong trending markets
-5. **Risk Management** - Never trade into earnings, always use stop-losses
-
-See [TAO_OF_TRADING_METHODOLOGY.md](docs/TAO_OF_TRADING_METHODOLOGY.md) for complete details.
-
----
-
-## ⚠️ Disclaimer
-
-**This bot is for educational purposes only. Not financial advice.**
-
-- Always do your own research
-- Never risk more than you can afford to lose
-- Options trading carries significant risk
-- Past performance doesn't guarantee future results
-- Consult a licensed financial advisor before trading
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## 📞 Support
-
-- **Issues**: [GitHub Issues](https://github.com/YOUR_USERNAME/stockanalysis/issues)
-- **Documentation**: See `/docs` folder
-- **Railway Deployment**: [RAILWAY_DEPLOYMENT.md](RAILWAY_DEPLOYMENT.md)
-- **Build Troubleshooting**: [RAILWAY_BUILD_FIX.md](RAILWAY_BUILD_FIX.md)
-
----
-
-## 🙏 Acknowledgments
-
-- **The Tao of Trading** by Simon Ree - Trading methodology foundation
-- **Yahoo Finance** - Free market data API
-- **Railway.app** - Affordable, reliable hosting platform
-- **Telegram** - Powerful bot platform
-
----
-
-## 📸 Screenshots
-
-### Telegram Bot in Action
-
-**Starting the Bot:**
+## Layout
 ```
-/start
-👋 Hi! Welcome to Stock Trend Analyzer Bot!
-📈 I can analyze stocks and provide options recommendations
+stock_tracker.py      entry point (Railway)
+app.py                Streamlit dashboard
+events.yaml           macro event calendar + sector bellwethers
+stockbot/
+  indicators.py       EMA, RSI, slow stochastic, ATR, ADX/DI (Wilder)
+  signals.py          gates → triggers → confidence (vectorized; shared with the backtest)
+  risk.py             stop / targets / size
+  regime.py           market regime score
+  events.py           event veto
+  sector.py           sector ETF guard
+  levels.py           support / resistance from swing pivots
+  data.py             batched Yahoo download, earnings dates, FRED, news
+  scanner.py          builds the shared context and evaluates symbols
+  brief.py            morning brief (+ optional Claude/web-search section)
+  report.py           message formatting (WhatsApp / Telegram HTML / Discord / plain)
+  alerts.py           delivery channels
+  tracker.py          scheduler, alert de-duplication, CLI
+  bot.py              interactive Telegram bot
+  backtest.py         backtest CLI
+tests/                pytest suite
 ```
-
-**Analyzing a Stock:**
-```
-AAPL
-🚀 Analysis complete!
-📞 Recommendation: BUY CALL OPTIONS
-✅ Confidence: VERY HIGH
-```
-
----
-
-Made with ❤️ for traders who want data-driven options trading decisions
-
-**⭐ Star this repo if you find it useful!**
-
-**🚀 Deploy your own bot today!** → [Railway Deployment Guide](RAILWAY_DEPLOYMENT.md)
