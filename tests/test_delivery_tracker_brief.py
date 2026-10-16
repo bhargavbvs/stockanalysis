@@ -38,7 +38,7 @@ def test_signal_message_has_plan():
     df = uptrend_pullback()
     s = evaluate("NVDA", df, earnings=EarningsInfo("none"), today=df.index[-1].date(), account_size=10_000)
     msg = signal_message(s)
-    assert "*NVDA – BUY CALL SIGNAL" in msg and "Stop $" in msg and "Target 2R" in msg and "shares" in msg
+    assert "*NVDA – CALL SIGNAL – all rules met" in msg and "Stop $" in msg and "Target 2R" in msg and "shares" in msg
     assert "not financial advice" in msg
 
 
@@ -124,35 +124,59 @@ def test_load_from_env(monkeypatch):
 
 
 # ----------------------------------------------------------------- tracker
-def test_scan_window():
+def test_scan_window_and_holidays():
     assert in_scan_window(datetime(2026, 10, 16, 10, 0, tzinfo=ET))
     assert in_scan_window(datetime(2026, 10, 16, 16, 10, tzinfo=ET))
     assert not in_scan_window(datetime(2026, 10, 16, 9, 0, tzinfo=ET))
     assert not in_scan_window(datetime(2026, 10, 17, 11, 0, tzinfo=ET))  # Saturday
+    assert not in_scan_window(datetime(2026, 11, 26, 11, 0, tzinfo=ET))  # Thanksgiving
+    assert not in_scan_window(datetime(2026, 11, 27, 14, 0, tzinfo=ET))  # early close 13:00
 
 
-def test_brief_due_and_retries(tmp_path):
+def test_close_scan_due_once_per_trading_day(tmp_path):
+    t = Tracker(_settings(data_dir=tmp_path), dry_run=True)
+    assert not t.close_scan_due(datetime(2026, 10, 16, 15, 0, tzinfo=ET))
+    assert t.close_scan_due(datetime(2026, 10, 16, 16, 11, tzinfo=ET))
+    t.state["last_close_scan"] = "2026-10-16"
+    assert not t.close_scan_due(datetime(2026, 10, 16, 16, 40, tzinfo=ET))
+    assert not t.close_scan_due(datetime(2026, 11, 26, 16, 20, tzinfo=ET))  # holiday
+    assert t.close_scan_due(datetime(2026, 11, 27, 13, 15, tzinfo=ET))  # early close day
+
+
+def test_brief_due_window_and_retries(tmp_path):
     t = Tracker(_settings(data_dir=tmp_path), dry_run=True)
     assert not t.brief_due(datetime(2026, 10, 16, 5, 59, tzinfo=PT))
     six = datetime(2026, 10, 16, 6, 0, tzinfo=PT)
     assert t.brief_due(six)
+    assert not t.brief_due(datetime(2026, 10, 16, 22, 30, tzinfo=PT))  # restart late at night: no "morning" brief
     t._brief_attempts["2026-10-16"] = [six]
     assert not t.brief_due(six + timedelta(minutes=5))  # wait before retrying a failure
     assert t.brief_due(six + timedelta(minutes=21))
     t.state["last_brief"] = "2026-10-16"
-    assert not t.brief_due(six + timedelta(hours=3))
+    assert not t.brief_due(six + timedelta(hours=1))
     t.s.brief_days = ("mon",)
     assert not t.brief_due(datetime(2026, 10, 17, 6, 0, tzinfo=PT))
 
 
-def test_should_alert_cooldown_and_caution(tmp_path):
+def test_failed_delivery_is_not_recorded(tmp_path, monkeypatch):
+    t = Tracker(_settings(data_dir=tmp_path))  # no channels configured -> nothing delivered
+    monkeypatch.setattr(brief, "build", lambda s, now=None: "brief text")
+    with pytest.raises(RuntimeError):
+        t.send_brief(datetime(2026, 10, 16, 6, 0, tzinfo=PT))
+    assert t.state["last_brief"] is None
+
+
+def test_should_alert_transition_cooldown_and_caution(tmp_path):
     df = uptrend_pullback()
     sig = evaluate("NVDA", df, earnings=EarningsInfo("none"), today=df.index[-1].date())
     t = Tracker(_settings(data_dir=tmp_path, min_confidence="MODERATE"), dry_run=True)
-    now = datetime(2026, 10, 16, 10, 0, tzinfo=ET)
+    now = datetime(2026, 10, 16, 16, 10, tzinfo=ET)
     assert t.should_alert(sig, now)
+    t.state["last_status"]["NVDA"] = "CALL:SIGNAL"
+    assert not t.should_alert(sig, now + timedelta(days=3))  # same setup still running: no repeat
+    t.state["last_status"]["NVDA"] = "CALL:SETUP"
     t.state["alerts"]["NVDA:CALL:SIGNAL"] = (now - timedelta(hours=2)).isoformat()
-    assert not t.should_alert(sig, now)
+    assert not t.should_alert(sig, now)  # came back within the cooldown
     assert t.should_alert(sig, now + timedelta(hours=23))
 
     caution = rg.Regime(asof=None, score=2, components=[])
@@ -161,6 +185,16 @@ def test_should_alert_cooldown_and_caution(tmp_path):
     assert not t.should_alert(sig, now)  # CAUTION needs HIGH for calls
     sig.confidence = "HIGH"
     assert t.should_alert(sig, now)
+
+
+def test_config_validation(monkeypatch):
+    monkeypatch.setenv("BRIEF_TIME", "6am")
+    with pytest.raises(ValueError):
+        config.load(env_file=None)
+    monkeypatch.setenv("BRIEF_TIME", "06:00")
+    monkeypatch.setenv("BRIEF_TZ", "Pacific")
+    with pytest.raises(ValueError):
+        config.load(env_file=None)
 
 
 # ----------------------------------------------------------------- end to end with fake data
@@ -178,7 +212,7 @@ def fake_network(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "get_next_earnings", lambda s, today=None: EarningsInfo("known", idx[-1].date() + timedelta(days=40)))
     monkeypatch.setattr(data, "fetch_news", lambda s, limit=5: [{"title": f"{s} headline", "publisher": "Reuters"}])
     monkeypatch.setattr(sector.SectorMap, "_lookup", staticmethod(lambda s: ({"NVDA": "SOXX"}.get(s, "XLK"), True)))
-    now = datetime.combine(idx[-1].date(), datetime.min.time(), tzinfo=ET).replace(hour=12)
+    now = datetime.combine(idx[-1].date(), datetime.min.time(), tzinfo=ET).replace(hour=17)
     monkeypatch.setattr(scanner, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: now)}))
     s = _settings(data_dir=tmp_path, watchlist=["NVDA", "AAPL", "TSLA"],
                   portfolio=[config.Holding("NVDA", 10, 300.0), config.Holding("TSLA", 5, None)],

@@ -18,6 +18,7 @@ import json
 import logging
 import smtplib
 import time
+import urllib.parse
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from email.mime.text import MIMEText
@@ -46,6 +47,14 @@ class Notifier:
     def __init__(self, settings, session: Optional[requests.Session] = None):
         self.s = settings
         self.http = session or requests.Session()
+        self._secrets = [x for x in (settings.telegram_token, settings.callmebot_api_key, settings.twilio_auth_token,
+                                     settings.email_password, settings.whatsapp_phone) if x and len(x) >= 4]
+
+    def _redact(self, text: str) -> str:
+        """Never let a token, API key or phone number reach the logs."""
+        for secret in self._secrets:
+            text = text.replace(secret, "***").replace(urllib.parse.quote(secret, safe=""), "***")
+        return text
 
     # ------------------------------------------------------------------ #
     @property
@@ -81,7 +90,8 @@ class Notifier:
                 elif ch == "webhook":
                     results[ch] = self.send_webhook({"subject": subject, "text": to_plain(text), **(payload or {})})
             except Exception as exc:
-                log.error("%s send failed: %s", ch, exc)
+                # exception text from requests contains the full URL (with keys) – log the type only
+                log.error("%s send failed: %s", ch, type(exc).__name__)
                 results[ch] = False
         if not self.channels:
             log.warning("No notification channel configured – message not sent:\n%s", to_plain(text))
@@ -91,8 +101,12 @@ class Notifier:
     def send_whatsapp(self, text: str) -> bool:
         s = self.s
         ok = True
-        limit = 1500 if s.whatsapp_provider == "callmebot" else 1550
-        for i, chunk in enumerate(split_message(text, limit)):
+        if s.whatsapp_provider == "callmebot":
+            # sized by URL-encoded length: emoji / non-Latin text expands a lot
+            chunks = split_message(text, 3000, measure=lambda t: len(urllib.parse.quote(t, safe="")))
+        else:
+            chunks = split_message(text, 1550)
+        for i, chunk in enumerate(chunks):
             if i:
                 time.sleep(3)  # CallMeBot drops messages sent back-to-back
             if s.whatsapp_provider == "twilio":
@@ -111,27 +125,34 @@ class Notifier:
                 )
                 good = r.status_code == 200 and "error" not in r.text.lower()
             if not good:
-                log.error("WhatsApp (%s) failed: HTTP %s %s", s.whatsapp_provider, r.status_code, r.text[:200])
+                log.error("WhatsApp (%s) failed: HTTP %s %s", s.whatsapp_provider, r.status_code,
+                          self._redact(r.text[:200]))
             ok &= good
         return ok
 
     def send_telegram(self, text: str) -> bool:
         ok = True
+        url = f"https://api.telegram.org/bot{self.s.telegram_token}/sendMessage"
         for chunk in split_message(text, 3500):
+            data = {"chat_id": self.s.telegram_chat_id, "text": to_telegram_html(chunk),
+                    "parse_mode": "HTML", "disable_web_page_preview": "true"}
             for attempt in range(3):
-                r = self.http.post(
-                    f"https://api.telegram.org/bot{self.s.telegram_token}/sendMessage",
-                    data={"chat_id": self.s.telegram_chat_id, "text": to_telegram_html(chunk),
-                          "parse_mode": "HTML", "disable_web_page_preview": "true"},
-                    timeout=TIMEOUT,
-                )
+                r = self.http.post(url, data=data, timeout=TIMEOUT)
                 if r.status_code == 429:
-                    wait = r.json().get("parameters", {}).get("retry_after", 5)
+                    try:
+                        wait = r.json().get("parameters", {}).get("retry_after", 5)
+                    except Exception:
+                        wait = 5
                     time.sleep(min(int(wait), 30))
+                    continue
+                if r.status_code == 400 and "parse_mode" in data:
+                    # e.g. overlapping *bold _italic* marks -> resend as plain text
+                    data = {"chat_id": self.s.telegram_chat_id, "text": to_plain(chunk),
+                            "disable_web_page_preview": "true"}
                     continue
                 break
             if r.status_code != 200:
-                log.error("Telegram failed: HTTP %s %s", r.status_code, r.text[:200])
+                log.error("Telegram failed: HTTP %s %s", r.status_code, self._redact(r.text[:200]))
                 ok = False
         return ok
 
@@ -140,7 +161,7 @@ class Notifier:
         for chunk in split_message(text, 1900):
             r = self.http.post(self.s.discord_webhook_url, json={"content": to_discord(chunk)}, timeout=TIMEOUT)
             if r.status_code not in (200, 204):
-                log.error("Discord failed: HTTP %s %s", r.status_code, r.text[:200])
+                log.error("Discord failed: HTTP %s %s", r.status_code, self._redact(r.text[:200]))
                 ok = False
         return ok
 
@@ -158,6 +179,6 @@ class Notifier:
         r = self.http.post(self.s.webhook_url, data=json.dumps(payload, default=_json_default),
                            headers={"Content-Type": "application/json"}, timeout=TIMEOUT)
         if r.status_code >= 300:
-            log.error("Webhook failed: HTTP %s %s", r.status_code, r.text[:200])
+            log.error("Webhook failed: HTTP %s %s", r.status_code, self._redact(r.text[:200]))
             return False
         return True

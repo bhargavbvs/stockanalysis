@@ -8,6 +8,7 @@
 #         SOXX / XLK ... -> only stocks whose sector ETF matches
 #         [AAPL, MSFT]   -> only those tickers
 #
+# The morning brief warns when the last market-wide event is < 45 days away.
 # Keep this file up to date: add tariff deadlines, war deadlines, etc. as they
 # are announced. Sources: federalreserve.gov (FOMC), bls.gov/schedule (CPI, jobs).
 
@@ -21,11 +22,15 @@ events:
   - {date: 2026-12-10, name: "CPI (Nov)", scope: market}
   # --- 2027 (FOMC dates tentative until the Fed confirms) ---
   - {date: 2027-01-10, name: "US-China trade truce expiry (verify)", scope: market}
+  - {date: 2027-01-08, name: "Jobs report (Dec) – tentative", scope: market}
   - {date: 2027-01-13, name: "CPI (Dec)", scope: market}
   - {date: 2027-01-27, name: "FOMC rate decision", scope: market}
+  - {date: 2027-02-05, name: "Jobs report (Jan) – tentative", scope: market}
   - {date: 2027-02-11, name: "CPI (Jan)", scope: market}
+  - {date: 2027-03-05, name: "Jobs report (Feb) – tentative", scope: market}
   - {date: 2027-03-10, name: "CPI (Feb)", scope: market}
   - {date: 2027-03-17, name: "FOMC rate decision + projections", scope: market}
+  - {date: 2027-04-02, name: "Jobs report (Mar) – tentative", scope: market}
   - {date: 2027-04-13, name: "CPI (Mar)", scope: market}
   - {date: 2027-04-28, name: "FOMC rate decision", scope: market}
 

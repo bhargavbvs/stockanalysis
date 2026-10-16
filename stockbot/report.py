@@ -36,17 +36,25 @@ def to_plain(text: str) -> str:
     return _ITAL.sub(r"\1", _BOLD.sub(r"\1", text))
 
 
-def split_message(text: str, limit: int) -> list[str]:
-    """Split on line boundaries into chunks no longer than `limit`."""
+def split_message(text: str, limit: int, measure=len) -> list[str]:
+    """Split on line boundaries into chunks with measure(chunk) <= limit.
+
+    `measure` lets callers size chunks by something other than characters,
+    e.g. the URL-encoded length for CallMeBot's GET API (emoji and non-Latin
+    scripts expand 3–9x when encoded).
+    """
     chunks, cur = [], ""
     for line in text.splitlines(keepends=True):
-        while len(line) > limit:  # pathological long line
+        while measure(line) > limit:  # pathological long line: hard-cut it
             if cur:
                 chunks.append(cur)
                 cur = ""
-            chunks.append(line[:limit])
-            line = line[limit:]
-        if len(cur) + len(line) > limit:
+            k = len(line)
+            while k > 1 and measure(line[:k]) > limit:
+                k = max(1, int(k * 0.8))
+            chunks.append(line[:k])
+            line = line[k:]
+        if cur and measure(cur + line) > limit:
             chunks.append(cur)
             cur = ""
         cur += line

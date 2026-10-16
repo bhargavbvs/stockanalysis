@@ -66,6 +66,15 @@ def test_panic_is_defensive():
     assert "credit" in [c.key for c in r.components if not c.available]
 
 
+def test_hy_spread_is_lagged_one_session():
+    idx = pd.bdate_range("2025-01-01", periods=260)
+    m = calm_market(idx)
+    hy = pd.Series(3.0, index=idx)
+    hy.iloc[-1] = 9.0  # today's print isn't published until tomorrow
+    r = rg.assess(m, hy)
+    assert r.values["hy"] == pytest.approx(3.0)
+
+
 def test_old_style_tnx_quotes_are_normalised():
     idx = pd.bdate_range("2025-01-01", periods=260)
     m = calm_market(idx)
@@ -105,6 +114,18 @@ def test_veto_window_is_session_before_and_day_of():
     monday = Event(date(2026, 11, 9), "Jobs")
     assert next_session(date(2026, 11, 6)) == date(2026, 11, 9)
     assert blocking_event([monday], date(2026, 11, 6), "AAPL")  # Friday before a Monday event
+    # Holiday: Fri Jan 15 2027 -> next session is Tue Jan 19 (MLK day Mon Jan 18)
+    tue = Event(date(2027, 1, 19), "Something")
+    assert next_session(date(2027, 1, 15)) == date(2027, 1, 19)
+    assert blocking_event([tue], date(2027, 1, 15), "AAPL")
+
+
+def test_calendar_runs_out_warning():
+    from stockbot.events import calendar_runs_out
+
+    evs = [Event(date(2027, 4, 28), "FOMC")]
+    assert calendar_runs_out(evs, date(2026, 10, 16)) is None
+    assert calendar_runs_out(evs, date(2027, 4, 1)) == date(2027, 4, 28)
 
 
 def test_block_series_matches_live_rule():

@@ -98,7 +98,7 @@ class Settings:
     min_confidence: str = "MODERATE"
     alert_cooldown_hours: float = 24.0
     alert_setups: bool = False
-    confirm_on_close: bool = False
+    confirm_on_close: bool = True
     events_file: Path = Path("events.yaml")
     sector_guard: bool = True
     sector_overrides: dict[str, str] = field(default_factory=dict)
@@ -154,6 +154,25 @@ def load(env_file: Optional[str] = ".env") -> Settings:
     if provider not in ("callmebot", "twilio"):
         raise ValueError("WHATSAPP_PROVIDER must be callmebot or twilio")
     days = tuple(d.strip().lower()[:3] for d in _env("BRIEF_DAYS", ",".join(DAYS)).split(",") if d.strip())
+    bad_days = [d for d in days if d not in DAYS]
+    if bad_days:
+        raise ValueError(f"BRIEF_DAYS has unknown days {bad_days}; use mon,tue,wed,thu,fri,sat,sun")
+    brief_time = _env("BRIEF_TIME", "06:00")
+    try:
+        hh, mm = (int(x) for x in brief_time.split(":"))
+        assert 0 <= hh < 24 and 0 <= mm < 60
+    except Exception:
+        raise ValueError(f"BRIEF_TIME must be HH:MM (24h), got {brief_time!r}") from None
+    brief_tz = _env("BRIEF_TZ", "America/Los_Angeles")
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(brief_tz)
+    except Exception:
+        raise ValueError(f"BRIEF_TZ must be an IANA time zone like America/Los_Angeles, got {brief_tz!r}") from None
+    unknown_earnings = _env("EARNINGS_UNKNOWN", "block").lower()
+    if unknown_earnings not in ("block", "warn"):
+        raise ValueError("EARNINGS_UNKNOWN must be block or warn")
 
     return Settings(
         whatsapp_provider=provider,
@@ -178,14 +197,14 @@ def load(env_file: Optional[str] = ".env") -> Settings:
         min_confidence=min_conf,
         alert_cooldown_hours=_float("ALERT_COOLDOWN_HOURS", 24.0),
         alert_setups=_bool("ALERT_SETUPS", False),
-        confirm_on_close=_bool("CONFIRM_ON_CLOSE", False),
+        confirm_on_close=_bool("CONFIRM_ON_CLOSE", True),
         events_file=Path(_env("EVENTS_FILE", "events.yaml")),
         sector_guard=_bool("SECTOR_GUARD", True),
         sector_overrides=_pairs(_env("SECTOR_OVERRIDES")),
         data_dir=Path(_env("DATA_DIR", "data")),
         brief_enabled=_bool("BRIEF_ENABLED", True),
-        brief_time=_env("BRIEF_TIME", "06:00"),
-        brief_tz=_env("BRIEF_TZ", "America/Los_Angeles"),
+        brief_time=brief_time,
+        brief_tz=brief_tz,
         brief_days=days or DAYS,
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         brief_model=_env("BRIEF_MODEL", "claude-sonnet-5-5"),
@@ -198,6 +217,7 @@ def load(env_file: Optional[str] = ".env") -> Settings:
             adx_min=_float("ADX_MIN", 20.0),
             earnings_days=_int("EARNINGS_BLACKOUT_DAYS", 14),
             use_regime=_bool("REGIME_FILTER", True),
+            block_unknown_earnings=unknown_earnings == "block",
         ),
         risk=RiskParams(target_r=_float("TARGET_R", 2.0), max_hold_bars=_int("MAX_HOLD_DAYS", 20)),
         regime=RegimeParams(vix_max=_float("VIX_MAX", 25.0), vix_spike_pct=_float("VIX_SPIKE_PCT", 30.0)),

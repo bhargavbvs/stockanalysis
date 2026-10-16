@@ -143,7 +143,7 @@ def gather(settings: Settings, now: Optional[datetime] = None) -> BriefData:
 MODE_LINE = {
     "NORMAL": "normal size – the bot's rules are fully on",
     "CAUTION": "half size, CALLs only on HIGH-confidence setups",
-    "DEFENSIVE": "no new CALLs – protect capital, PUT setups only",
+    "DEFENSIVE": "no new CALLs pass the rules; only PUT setups qualify",
 }
 
 
@@ -204,6 +204,9 @@ def render(b: BriefData, ai_text: Optional[str] = None) -> str:
         L += ["", ai_text.strip()]
 
     L += ["", "*Coming up (next 2 weeks)*"]
+    runs_out = ev.calendar_runs_out(b.ctx.events, b.ctx.today)
+    if runs_out is not None:
+        L.append(f"⚠️ events.yaml has no market events after {runs_out:%b %d} – add the next CPI/jobs/FOMC dates")
     if b.upcoming:
         for e in b.upcoming:
             days = (e.day - b.ctx.today).days
@@ -309,6 +312,13 @@ def facts_for_ai(b: BriefData) -> dict:
     }
 
 
+def _domain(url: str) -> str:
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 def ai_take(b: BriefData, settings: Settings, max_chars: int = 1800) -> Optional[str]:
     if not settings.anthropic_api_key:
         return None
@@ -318,29 +328,47 @@ def ai_take(b: BriefData, settings: Settings, max_chars: int = 1800) -> Optional
         log.warning("anthropic package not installed – skipping AI section")
         return None
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=180)
+    # bounded: one retry, 2 minutes per call, at most 3 continuations
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120, max_retries=1)
     system = AI_SYSTEM.format(language=settings.brief_language, max_chars=max_chars)
     user = ("Facts from the bot (JSON):\n" + json.dumps(facts_for_ai(b), default=str, indent=1) +
             ("\n\nIt is the weekend: focus on the week ahead." if b.weekend else ""))
-    messages = [{"role": "user", "content": user}]
     tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": settings.brief_max_searches}]
+    blocks: list = []  # every assistant content block so far, across pause_turn continuations
     try:
-        for _ in range(4):  # pause_turn continuation
+        for _ in range(4):
+            messages = [{"role": "user", "content": user}]
+            if blocks:
+                messages.append({"role": "assistant", "content": blocks})
             resp = client.messages.create(model=settings.brief_model, max_tokens=2000, system=system,
                                           messages=messages, tools=tools)
+            blocks = blocks + list(resp.content)
             if resp.stop_reason != "pause_turn":
                 break
-            messages = [messages[0], {"role": "assistant", "content": resp.content}]
+        if resp.stop_reason == "max_tokens":
+            log.warning("AI section hit max_tokens – it may be cut short")
     except Exception as exc:
-        log.error("AI brief failed: %s", exc)
+        log.error("AI brief failed: %s", type(exc).__name__)
         return None
 
-    blocks = list(resp.content)
     last_tool = max((i for i, blk in enumerate(blocks) if blk.type != "text"), default=-1)
-    text = "".join(blk.text for blk in blocks[last_tool + 1:] if blk.type == "text").strip()
+    final = [blk for blk in blocks[last_tool + 1:] if blk.type == "text"] or [blk for blk in blocks if blk.type == "text"]
+    text = "".join(blk.text for blk in final).strip()
     if not text:
-        text = "".join(blk.text for blk in blocks if blk.type == "text").strip()
-    return text[: max_chars + 400] or None
+        return None
+    if len(text) > max_chars + 400:
+        text = text[: max_chars + 400].rsplit("\n", 1)[0] + "\n…"
+
+    # Web-search results shown to users must carry their sources.
+    sources: list[str] = []
+    for blk in final:
+        for c in getattr(blk, "citations", None) or []:
+            url = getattr(c, "url", None)
+            if url and _domain(url) not in sources:
+                sources.append(_domain(url))
+    if sources:
+        text += "\n_Sources: " + ", ".join(sources[:5]) + "_"
+    return text
 
 
 def build(settings: Settings, now: Optional[datetime] = None, use_ai: bool = True) -> str:

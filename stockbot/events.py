@@ -16,6 +16,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from . import marketcal
+
 log = logging.getLogger(__name__)
 
 MARKET = "market"
@@ -78,7 +80,17 @@ def bellwether_events(bellwethers: dict[str, list[str]], today: date, horizon_da
 
 
 def next_session(day: date) -> date:
-    return (pd.Timestamp(day) + pd.offsets.BDay(1)).date()
+    """Next NYSE trading day (skips weekends and exchange holidays)."""
+    return marketcal.next_session(day)
+
+
+def calendar_runs_out(events: Iterable[Event], today: date, warn_days: int = 45) -> Optional[date]:
+    """Last scheduled market-wide event if it is less than `warn_days` away."""
+    market = [e.day for e in events if MARKET in e.scope]
+    last = max(market) if market else None
+    if last is None or (last - today).days < warn_days:
+        return last or today
+    return None
 
 
 def blocking_event(events: Iterable[Event], today: date, symbol: str,
@@ -103,6 +115,6 @@ def block_series(events: Iterable[Event], index: pd.DatetimeIndex, symbol: str,
     for e in events:
         if e.applies_to(symbol, sector_etf):
             ev = pd.Timestamp(e.day)
-            prev = ev - pd.offsets.BDay(1)
+            prev = pd.Timestamp(marketcal.prev_session(e.day))
             flags |= (days == ev) | (days == prev)
     return flags

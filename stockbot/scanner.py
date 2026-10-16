@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import data, events as ev, regime as rg, sector as sec
+from . import data, events as ev, marketcal, regime as rg, sector as sec
 from .signals import Signal, evaluate
 
 log = logging.getLogger(__name__)
@@ -36,9 +36,15 @@ class Context:
 
 def market_is_open(now: Optional[datetime] = None) -> bool:
     now = (now or datetime.now(ET)).astimezone(ET)
-    if now.weekday() >= 5:
+    if not marketcal.is_trading_day(now.date()):
         return False
-    return now.replace(hour=9, minute=30, second=0, microsecond=0) <= now < now.replace(hour=16, minute=0, second=0, microsecond=0)
+    ch, cm = marketcal.close_time(now.date())
+    return now.replace(hour=9, minute=30, second=0, microsecond=0) <= now < now.replace(
+        hour=ch, minute=cm, second=0, microsecond=0)
+
+
+def _drop_partial(history: dict[str, pd.DataFrame], today: date) -> dict[str, pd.DataFrame]:
+    return {k: (v[v.index.date < today] if not v.empty else v) for k, v in history.items()}
 
 
 def build_context(settings, symbols: Iterable[str], now: Optional[datetime] = None) -> Context:
@@ -47,30 +53,31 @@ def build_context(settings, symbols: Iterable[str], now: Optional[datetime] = No
     symbols = [s.upper() for s in symbols]
 
     market, hy = rg.load_inputs()
+    spy = market.get(rg.SPY)
+    partial = spy is not None and not spy.empty and spy.index[-1].date() == today and market_is_open(now)
+    if partial and settings.confirm_on_close:
+        market = _drop_partial(market, today)  # score the regime on closed bars too
     regime = rg.assess(market, hy, settings.regime)
 
     calendar, bellwethers = ev.load_calendar(settings.events_file)
     events = calendar + ev.bellwether_events(bellwethers, today)
 
+    # Sector ETFs are always mapped (they scope bellwether-earnings vetoes);
+    # SECTOR_GUARD only decides whether an overheated sector blocks CALLs.
     smap = sec.SectorMap(settings.data_dir / "sectors.json", settings.sector_overrides)
-    sectors = {s: smap.get(s) for s in symbols} if settings.sector_guard else {}
-    etfs = sorted({e for e in sectors.values() if e})
+    sectors = {s: smap.get(s) for s in symbols}
+    etfs = sorted({e for e in sectors.values() if e}) if settings.sector_guard else []
 
     wanted = [s for s in list(dict.fromkeys(symbols + etfs)) if s not in market]
-    history = {**{k: v for k, v in market.items()}, **data.fetch_history(wanted)}
+    history = {**market, **data.fetch_history(wanted)}
+    if partial and settings.confirm_on_close:
+        history = _drop_partial(history, today)
+        partial = False
     states = {}
     for etf in etfs:
         st = sec.assess(etf, history.get(etf))
         if st:
             states[etf] = st
-
-    partial = False
-    spy = history.get(rg.SPY)
-    if spy is not None and not spy.empty:
-        partial = spy.index[-1].date() == today and market_is_open(now)
-    if partial and settings.confirm_on_close:
-        history = {k: (v[v.index.date < today] if not v.empty else v) for k, v in history.items()}
-        partial = False
 
     log.info("Regime %s | %d events loaded | %d sector ETFs", regime.describe(), len(events), len(states))
     return Context(today, regime, events, history, sectors, states, market, partial)
@@ -81,11 +88,10 @@ def ensure_symbols(ctx: Context, settings, symbols: Iterable[str]) -> None:
     new = [s.upper() for s in symbols if s.upper() not in ctx.history]
     if not new:
         return
-    if settings.sector_guard:
-        smap = sec.SectorMap(settings.data_dir / "sectors.json", settings.sector_overrides)
-        for s in new:
-            ctx.sectors[s] = smap.get(s)
-    etfs = {ctx.sectors.get(s) for s in new} - {None} - set(ctx.sector_states)
+    smap = sec.SectorMap(settings.data_dir / "sectors.json", settings.sector_overrides)
+    for s in new:
+        ctx.sectors[s] = smap.get(s)
+    etfs = ({ctx.sectors.get(s) for s in new} - {None} - set(ctx.sector_states)) if settings.sector_guard else set()
     ctx.history.update(data.fetch_history(new + sorted(etfs)))
     for etf in etfs:
         st = sec.assess(etf, ctx.history.get(etf))
@@ -101,6 +107,7 @@ def analyze(symbol: str, ctx: Context, settings, force_earnings: bool = False) -
     kwargs = dict(
         p=settings.strategy, regime=ctx.regime, risk=settings.risk, account_size=settings.account_size,
         risk_pct=settings.risk_pct, today=ctx.today, partial_bar=ctx.partial_bar, events=ctx.events, sector=state,
+        sector_etf=etf,
     )
     sig = evaluate(sym, df, **kwargs)
     if force_earnings or sig.direction is not None:

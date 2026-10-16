@@ -31,7 +31,7 @@ import pandas as pd
 
 from . import config, data, indicators, regime as rg, sector as sec
 from .risk import RiskParams, stop_distance
-from .signals import SIGNAL, StrategyParams, classify, criteria
+from .signals import CONFIDENCE, SIGNAL, StrategyParams, classify, criteria
 
 log = logging.getLogger(__name__)
 
@@ -66,29 +66,55 @@ def earnings_block_series(index: pd.DatetimeIndex, dates: Optional[list], days: 
 
 
 def simulate(symbol: str, ind: pd.DataFrame, cls: pd.DataFrame, rp: RiskParams,
-             regime_score: Optional[pd.Series] = None) -> list[Trade]:
+             regime_score: Optional[pd.Series] = None, earnings: Optional[list] = None) -> list[Trade]:
+    """Replay the live plan: levels anchored to the signal close, entry next open.
+
+    A trade is skipped when the next open has already gapped through the stop
+    or the target (the alert's levels are no longer valid). Positions are
+    closed at the end of the session before an earnings date, mirroring the
+    plan's "exit by" rule.
+    """
     o, h, l, c = (ind[k].to_numpy() for k in ("Open", "High", "Low", "Close"))
     atr = ind["atr"].to_numpy()
     status, direction, conf = cls["status"].to_numpy(), cls["direction"].to_numpy(), cls["confidence"].to_numpy()
     idx = ind.index
+    days = idx.normalize()
+    e_dates = np.array(sorted(pd.Timestamp(d).normalize() for d in (earnings or [])), dtype="datetime64[ns]")
     n = len(ind)
     trades: list[Trade] = []
     i = 0
     while i < n - 1:
-        if status[i] != SIGNAL or not isinstance(direction[i], str) or not np.isfinite(atr[i]):
+        if status[i] != SIGNAL or not isinstance(direction[i], str) or not np.isfinite(atr[i]) or atr[i] <= 0:
             i += 1
             continue
         d = direction[i]
+        sign = 1 if d == "CALL" else -1
         lo = max(0, i - rp.swing_lookback + 1)
         swing = float(l[lo:i + 1].min() if d == "CALL" else h[lo:i + 1].max())
         dist, _ = stop_distance(float(c[i]), swing, float(atr[i]), d, rp)
-        sign = 1 if d == "CALL" else -1
+        stop = float(c[i]) - sign * dist
+        target = float(c[i]) + sign * rp.target_r * dist
         e = i + 1
         entry = float(o[e])
-        stop, target = entry - sign * dist, entry + sign * rp.target_r * dist
+        risk = sign * (entry - stop)
+        if risk <= 0 or sign * (target - entry) <= 0:
+            i += 1  # gapped through the stop or the target before we could enter
+            continue
+
+        last = min(n - 1, e + rp.max_hold_bars - 1)
+        exit_reason_at_last = "time"
+        if len(e_dates):
+            k = np.searchsorted(e_dates, days[e].to_datetime64(), side="left")
+            if k < len(e_dates):
+                before = int(np.searchsorted(days.values, e_dates[k], side="left")) - 1  # session before earnings
+                if before < e:
+                    i += 1  # earnings tomorrow – the live veto would have blocked this
+                    continue
+                if before < last:
+                    last, exit_reason_at_last = before, "earnings"
 
         exit_px, reason, j = None, "open", e
-        for j in range(e, min(n, e + rp.max_hold_bars)):
+        for j in range(e, last + 1):
             op = float(o[j]) if j > e else entry
             if d == "CALL":
                 if l[j] <= stop:
@@ -103,11 +129,12 @@ def simulate(symbol: str, ind: pd.DataFrame, cls: pd.DataFrame, rp: RiskParams,
             if exit_px is not None:
                 break
         if exit_px is None:
-            j = min(n - 1, e + rp.max_hold_bars - 1)
+            j = last
             exit_px = float(c[j])
-            reason = "time" if j == e + rp.max_hold_bars - 1 else "open"
+            ended_early = j == n - 1 and exit_reason_at_last == "time" and j < e + rp.max_hold_bars - 1
+            reason = "open" if ended_early else exit_reason_at_last
 
-        r = sign * (exit_px - entry) / dist
+        r = sign * (exit_px - entry) / risk
         trades.append(Trade(symbol, d, idx[i], idx[e], entry, stop, target, idx[j], exit_px, reason,
                             r, j - e + 1, str(conf[i]),
                             None if regime_score is None or pd.isna(regime_score.iloc[i]) else int(regime_score.iloc[i])))
@@ -116,21 +143,25 @@ def simulate(symbol: str, ind: pd.DataFrame, cls: pd.DataFrame, rp: RiskParams,
 
 
 def summarize(trades: list[Trade]) -> dict:
-    if not trades:
-        return {"trades": 0}
-    r = np.array([t.r for t in trades])
+    """Stats over closed trades, in exit order (open trades are only counted)."""
+    closed = sorted((t for t in trades if t.reason != "open"), key=lambda t: t.exit_date)
+    open_n = len(trades) - len(closed)
+    if not closed:
+        return {"trades": 0, "open": open_n}
+    r = np.array([t.r for t in closed])
     cum = np.cumsum(r)
     dd = float((np.maximum.accumulate(np.r_[0.0, cum]) - np.r_[0.0, cum]).max())
     wins, losses = r[r > 0], r[r <= 0]
     return {
         "trades": len(r),
+        "open": open_n,
         "win_rate": float((r > 0).mean()),
         "avg_r": float(r.mean()),
         "median_r": float(np.median(r)),
         "total_r": float(r.sum()),
         "profit_factor": float(wins.sum() / -losses.sum()) if losses.sum() < 0 else math.inf,
         "max_dd_r": dd,
-        "avg_bars": float(np.mean([t.bars for t in trades])),
+        "avg_bars": float(np.mean([t.bars for t in closed])),
     }
 
 
@@ -153,7 +184,9 @@ VARIANTS = [
 def run(histories: dict[str, pd.DataFrame], sp: StrategyParams, rp: RiskParams, variant: Variant,
         regime_frame: Optional[pd.DataFrame] = None, earnings: Optional[dict[str, list]] = None,
         sectors: Optional[dict[str, pd.DataFrame]] = None, sector_of: Optional[dict[str, str]] = None,
-        defensive_at: int = 3) -> list[Trade]:
+        defensive_at: int = 3, caution_at: int = 2, min_conf_rank: int = 0) -> list[Trade]:
+    """Run one variant. Signals are filtered the way the live tracker filters
+    alerts: MIN_CONFIDENCE, and HIGH+ for CALLs while the regime is CAUTION."""
     trades: list[Trade] = []
     for sym, df in histories.items():
         if len(df) < 200:
@@ -170,10 +203,17 @@ def run(histories: dict[str, pd.DataFrame], sp: StrategyParams, rp: RiskParams, 
         etf = (sector_of or {}).get(sym)
         if variant.sector and etf and sectors and etf in sectors:
             sf = sec.sector_frame(sectors[etf])
-            s_block = (sf["extended"] | sf["breaking"]).reindex(ind.index).ffill().fillna(False)
+            blocked = (sf["extended"] | sf["breaking"]).astype(float)
+            s_block = blocked.reindex(ind.index).ffill().fillna(0.0).astype(bool)
         cls = classify(c, replace(sp, use_regime=variant.regime), earnings_block=e_block,
-                       risk_off=risk_off, sector_block=s_block)
-        trades += simulate(sym, ind, cls, rp, score)
+                       risk_off=risk_off, sector_block=s_block).copy()
+        rank = cls["confidence"].map({k: i for i, k in enumerate(CONFIDENCE)}).fillna(-1)
+        need = pd.Series(min_conf_rank, index=cls.index)
+        if variant.regime and score is not None:
+            caution = (score >= caution_at) & (score < defensive_at) & (cls["direction"] == "CALL")
+            need = need.where(~caution, max(min_conf_rank, CONFIDENCE.index("HIGH")))
+        cls.loc[(cls["status"] == SIGNAL) & (rank < need), "status"] = "FILTERED"
+        trades += simulate(sym, ind, cls, rp, score, (earnings or {}).get(sym) if variant.earnings else None)
     return trades
 
 
@@ -199,10 +239,10 @@ def forward_edge(histories: dict[str, pd.DataFrame], trades: list[Trade], horizo
 
 def _fmt(s: dict) -> str:
     if not s.get("trades"):
-        return "no trades"
+        return "no closed trades"
     return (f"{s['trades']:>4} trades | win {s['win_rate']:5.1%} | avg {s['avg_r']:+.2f}R | "
             f"total {s['total_r']:+7.1f}R | PF {s['profit_factor']:.2f} | maxDD {s['max_dd_r']:.1f}R | "
-            f"hold {s['avg_bars']:.1f}d")
+            f"hold {s['avg_bars']:.1f}d" + (f" | {s['open']} still open" if s.get("open") else ""))
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -238,7 +278,8 @@ def main(argv: Optional[list[str]] = None) -> int:
           f"stochastic; stop 1–3 ATR at swing, target {rp.target_r:g}R, time stop {rp.max_hold_bars}d\n")
     final = []
     for v in variants:
-        trades = run(hist, sp, rp, v, rframe, earnings, sectors, sector_of, s.regime.defensive_at)
+        trades = run(hist, sp, rp, v, rframe, earnings, sectors, sector_of, s.regime.defensive_at,
+                     s.regime.caution_at, s.min_confidence_rank)
         print(f"{v.name:<30} {_fmt(summarize(trades))}")
         final = trades
 
@@ -263,6 +304,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"\nNote: no earnings history for {', '.join(missing_e)} – earnings veto not applied to them.")
     if hy is None:
         print("Note: credit-spread data unavailable – that regime component was off.")
+    else:
+        first = min(df.index[0] for df in hist.values()) if hist else None
+        if first is not None and hy.index[0] > first + pd.Timedelta(days=30):
+            print(f"Note: FRED only serves the HY spread from {hy.index[0]:%Y-%m-%d}; before that the credit "
+                  "component was off, so early-period regime results are less strict.")
+    print("Note: the macro event veto (CPI/jobs/FOMC) is not applied to the past; today's symbols "
+          "carry survivorship bias (yesterday's losers aren't in the list).")
     print("Results are on the underlying in R multiples; options P&L is not modelled.")
 
     if args.csv:

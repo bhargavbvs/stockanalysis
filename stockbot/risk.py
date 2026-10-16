@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Optional
 
 import pandas as pd
@@ -47,6 +48,7 @@ class TradePlan:
     r_to_level: Optional[float] = None
     shares: Optional[int] = None
     risk_dollars: Optional[float] = None
+    exit_by: Optional[date] = None  # last session to hold (day before earnings)
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -86,6 +88,7 @@ def build_plan(
     levels: Optional[Levels] = None,
     account_size: Optional[float] = None,
     risk_pct: float = 1.0,
+    exit_by: Optional[date] = None,
 ) -> TradePlan:
     last = ind.iloc[-1]
     entry = float(last["Close"])
@@ -107,7 +110,10 @@ def build_plan(
         targets=targets,
         target_r=p.target_r,
         max_hold_bars=p.max_hold_bars,
+        exit_by=exit_by,
     )
+    if exit_by is not None:
+        plan.notes.append(f"earnings inside the hold – exit by the close on {exit_by:%a %b %d}")
 
     if levels is not None:
         lvl = (levels.resistance if direction == "CALL" else levels.support) or []

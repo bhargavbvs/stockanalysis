@@ -14,7 +14,7 @@ Gates decide the direction. They must **all** pass:
 |---|---|---|
 | EMA stack | 8 > 21 > 34 > 55 > 89 | 8 < 21 < 34 < 55 < 89 |
 | Trend | ADX(13) ≥ 20 **and** +DI > −DI | ADX(13) ≥ 20 **and** −DI > +DI |
-| Earnings | none within 14 days | same |
+| Earnings | none within 14 days, and the date must be verifiable (`EARNINGS_UNKNOWN=block`) | same |
 | Macro events | no CPI / jobs / FOMC / bellwether earnings today or next session | same |
 | Market regime | not DEFENSIVE (see below) | – |
 | Sector | sector ETF not extended (RSI > 75 or > 20% above 50-day) and not breaking down (3 closes under a falling 21 EMA) | – |
@@ -25,7 +25,9 @@ Gates decide the direction. They must **all** pass:
 
 **Confidence** comes from five quality checks: price vs the 200 EMA, the 20/40/200 EMA order, the 200 EMA slope, RSI in range, and distance from the 52-week high (low for puts). If the earnings date can't be verified, confidence drops one level.
 
-**Trade plan.** The stop sits past the 10-day swing low/high, clamped to 1–3 ATR so it is always on the correct side of the entry. Targets are 1R, 2R and 3R, with a time stop after 20 trading days. Position size comes from `ACCOUNT_SIZE × RISK_PER_TRADE_PCT`.
+**Trade plan.** The stop sits past the 10-day swing low/high, clamped to 1–3 ATR so it is always on the correct side of the entry. Targets are 1R, 2R and 3R, with a time stop after 20 trading days. If earnings land inside that hold, the plan says **exit by the close the session before** (no holding options through an earnings print). Position size comes from `ACCOUNT_SIZE × RISK_PER_TRADE_PCT`.
+
+**When signals are checked.** By default (`CONFIRM_ON_CLOSE=true`) the bot scans once per trading day, 10 minutes after the close (NYSE holidays and early closes included), on the completed daily candle. You act at the next open. This matches the backtest exactly. Setting `CONFIRM_ON_CLOSE=false` adds intraday scans on the unfinished candle; they come earlier but are noisier, and the backtest doesn't model them. An alert fires when a stock *becomes* a signal, not every day it stays one.
 
 ### Market regime score (0–5)
 One point each:
@@ -57,7 +59,7 @@ Credit spreads and the yield/oil check tend to move *before* sell-offs. VIX most
 Twilio is also supported (`WHATSAPP_PROVIDER=twilio`). WhatsApp only allows free-form business messages within 24 h of your last message to that number, so the daily brief needs you to reply now and then, or an approved template.
 
 ### 2. Telegram (optional, needed for the interactive bot)
-Create a bot with @BotFather and set `TELEGRAM_BOT_TOKEN`. Send `/start` to it to see your chat id, then set `TELEGRAM_CHAT_ID` and `ALLOWED_CHAT_IDS`.
+Create a bot with @BotFather and set `TELEGRAM_BOT_TOKEN`. Send `/start` to it to see your chat id, then set `TELEGRAM_CHAT_ID` and `ALLOWED_CHAT_IDS`. The interactive bot is deny-by-default: until your chat id is in `ALLOWED_CHAT_IDS` it only answers `/start`, so strangers can't see your portfolio or spend your Claude credits.
 
 ### 3. AI section of the brief (optional)
 Set `ANTHROPIC_API_KEY` (from console.anthropic.com). Each brief makes one Claude call with up to `BRIEF_MAX_SEARCHES` web searches, which costs roughly $0.10–0.20 with the default `claude-sonnet-5-5`. Without a key the brief still has everything except the news, scenarios and lesson.
@@ -78,7 +80,7 @@ cp .env.example .env              # fill in your keys
 python stock_tracker.py --test    # send a test message to every channel
 python stock_tracker.py --brief   # send today's brief now  (--dry-run to just print it)
 python stock_tracker.py --once    # one scan now
-python stock_tracker.py           # run forever: brief at BRIEF_TIME + scans 9:30–16:15 ET
+python stock_tracker.py           # run forever: brief at BRIEF_TIME + a scan after each close
 
 python -m stockbot.bot            # interactive Telegram bot: /analyze NVDA, /market, /brief
 streamlit run app.py              # dashboard (pip install -r requirements-app.txt)
@@ -91,7 +93,7 @@ The repo is ready as is: `railway.json` runs `python stock_tracker.py`.
 3. Optional: add a **Volume** mounted at `/app/data` and set `DATA_DIR=/app/data`, so alert history survives redeploys.
 4. To run the interactive Telegram bot as well, add a second service with start command `python -m stockbot.bot`.
 
-On a crash the process exits with code 1, so Railway restarts it, and you also get a WhatsApp/Telegram message about it.
+On a crash the process exits with code 1, so Railway restarts it, and you also get a WhatsApp/Telegram message about it. Without a volume, alert history resets on every deploy, so a signal that is still live can be re-sent once after a redeploy. The brief only catches up within 3 hours of `BRIEF_TIME`, so a late-night restart won't send a "morning" brief.
 
 ---
 
@@ -101,7 +103,11 @@ On a crash the process exits with code 1, so Railway restarts it, and you also g
 python -m stockbot.backtest --period 10y --compare          # effect of each filter layer
 python -m stockbot.backtest --symbols NVDA AMD --csv trades.csv
 ```
-The backtest replays the exact live rules with no look-ahead. Signals are entered at the next day's open; the stop is checked before the target, and gaps fill at the open. It reports win rate, average R, profit factor, max drawdown in R, splits by direction, confidence and year, and the 10-day move after signals compared with any random day. Run it on your own symbols before trusting the filters.
+The backtest replays the live rules on completed daily bars with no look-ahead, using the same filters as the alerts (`MIN_CONFIDENCE`, and HIGH+ for CALLs in a CAUTION regime).
+- The stop and target are anchored to the signal close, exactly like the alert. Entry is at the next open, and trades that gap through either level are skipped.
+- The stop is checked before the target, and later gaps fill at the open.
+- Positions exit the session before earnings.
+- Not modelled: the CPI/jobs/FOMC veto in the past, FRED's HY spread before ~2023, intraday mode, and survivorship bias. It reports win rate, average R, profit factor, max drawdown in R, splits by direction, confidence and year, and the 10-day move after signals compared with any random day. Run it on your own symbols before trusting the filters.
 
 ---
 

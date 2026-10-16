@@ -62,14 +62,32 @@ def test_earnings_outside_blackout_ok(up_df):
     assert s.status == SIGNAL
 
 
-def test_unknown_earnings_lowers_confidence(up_df):
+def test_unknown_earnings_blocks_by_default(up_df):
+    s = evaluate("T", up_df, earnings=EarningsInfo("unknown"), today=today(up_df))
+    assert s.status == EARNINGS_BLOCK and "couldn't be verified" in s.headline
+
+
+def test_unknown_earnings_can_warn_instead(up_df):
+    from stockbot.signals import StrategyParams
+
     t = today(up_df)
-    known = evaluate("T", up_df, earnings=NONE, today=t)
-    unknown = evaluate("T", up_df, earnings=EarningsInfo("unknown"), today=t)
+    p = StrategyParams(block_unknown_earnings=False)
+    known = evaluate("T", up_df, p, earnings=NONE, today=t)
+    unknown = evaluate("T", up_df, p, earnings=EarningsInfo("unknown"), today=t)
     assert unknown.status == SIGNAL
     order = ["LOW", "MODERATE", "HIGH", "VERY HIGH"]
     assert order.index(unknown.confidence) == order.index(known.confidence) - 1
     assert any("earnings date could not be checked" in w for w in unknown.warnings)
+
+
+def test_plan_exits_before_earnings_inside_the_hold(up_df):
+    t = today(up_df)
+    s = evaluate("T", up_df, earnings=EarningsInfo("known", t + timedelta(days=21)), today=t)
+    assert s.status == SIGNAL
+    assert s.plan.exit_by is not None and s.plan.exit_by < t + timedelta(days=21)
+    assert any("exit by" in n for n in s.plan.notes)
+    far = evaluate("T", up_df, earnings=EarningsInfo("known", t + timedelta(days=60)), today=t)
+    assert far.plan.exit_by is None
 
 
 def test_macro_event_tomorrow_blocks(up_df):
@@ -117,8 +135,19 @@ def test_caution_regime_halves_size(up_df):
 def test_regime_filter_can_be_disabled(up_df):
     from stockbot.signals import StrategyParams
 
-    s = evaluate("T", up_df, StrategyParams(use_regime=False), earnings=NONE, today=today(up_df), regime=_regime(5))
+    p = StrategyParams(use_regime=False)
+    s = evaluate("T", up_df, p, earnings=NONE, today=today(up_df), regime=_regime(5), account_size=100_000)
     assert s.status == SIGNAL
+    assert s.plan.risk_dollars == 1000  # no regime sizing either
+    c = evaluate("T", up_df, p, earnings=NONE, today=today(up_df), regime=_regime(2))
+    assert not any("half size" in w for w in c.warnings)
+
+
+def test_sector_event_applies_without_sector_guard(up_df):
+    t = today(up_df)
+    e = [Event(t, "NVDA earnings", ("SOXX", "NVDA"))]
+    s = evaluate("T", up_df, earnings=NONE, today=t, events=e, sector=None, sector_etf="SOXX")
+    assert s.status == EVENT_BLOCK
 
 
 def test_setup_when_only_one_trigger():

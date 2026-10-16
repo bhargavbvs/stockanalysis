@@ -1,9 +1,11 @@
-# Runtime (tracker, morning brief, Telegram bot)
-yfinance>=0.2.54
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-python-dotenv>=1.0
-PyYAML>=6.0
-python-telegram-bot>=21.0
-anthropic>=0.40   # optional: AI section of the morning brief (needs ANTHROPIC_API_KEY)
+# Runtime (tracker, morning brief, Telegram bot). Upper bounds guard against
+# breaking data-shape changes; bump deliberately and re-run the tests.
+yfinance>=0.2.54,<2
+pandas>=2.2,<4
+numpy>=1.26,<3
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+PyYAML>=6.0,<7
+tzdata>=2024.1          # IANA time zones on slim Linux images
+python-telegram-bot>=21.0,<23
+anthropic>=0.40         # optional: AI section of the morning brief (needs ANTHROPIC_API_KEY)

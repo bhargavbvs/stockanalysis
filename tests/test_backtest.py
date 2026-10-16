@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from conftest import make_ohlc
-from stockbot.backtest import VARIANTS, earnings_block_series, forward_edge, run, simulate, summarize
+from stockbot.backtest import VARIANTS, Trade, earnings_block_series, forward_edge, run, simulate, summarize
 from stockbot.risk import RiskParams
 from stockbot.signals import SIGNAL, StrategyParams
 
@@ -91,5 +91,40 @@ def test_full_run_and_variants():
     vetoed = run(hist, sp, rp, VARIANTS[1], earnings=eds)
     assert len(vetoed) < len(core)
     s = summarize(core)
-    assert s["trades"] == len(core) and -1.5 < s["avg_r"] < 3.5
+    assert s["trades"] + s["open"] == len(core) and -1.5 < s["avg_r"] < 3.5
     assert forward_edge(hist, core)["signals"] is not None
+
+
+def test_exits_the_session_before_earnings():
+    rows = [(100, 101, 99, 100)] * 13 + [(100, 100.4, 99.6, 100)] * 30
+    df = _bars(rows)
+    earn = [df.index[18].date()]
+    t = simulate("X", df, _cls(df.index, [12]), RiskParams(swing_lookback=3, max_hold_bars=20), earnings=earn)[0]
+    assert t.reason == "earnings" and t.exit_date == df.index[17]
+
+
+def test_gap_beyond_target_or_stop_is_skipped():
+    rows = [(100, 101, 99, 100)] * 13 + [(120, 121, 119, 120)] + [(120, 121, 119, 120)] * 5
+    df = _bars(rows)
+    assert simulate("X", df, _cls(df.index, [12]), RiskParams(swing_lookback=3)) == []
+
+
+def test_confidence_filter_matches_live_alerts():
+    hist = {"UP": saw_uptrend()}
+    sp, rp = StrategyParams(), RiskParams()
+    everything = run(hist, sp, rp, VARIANTS[0])
+    only_top = run(hist, sp, rp, VARIANTS[0], min_conf_rank=3)
+    assert len(only_top) <= len(everything)
+    assert all(t.confidence == "VERY HIGH" for t in only_top)
+
+
+def test_drawdown_uses_exit_order():
+    def tr(sym, day, r):
+        ts = pd.Timestamp(day)
+        return Trade(sym, "CALL", ts, ts, 1, 0, 2, ts, 1, "stop" if r < 0 else "target", r, 1, "HIGH")
+    trades = [tr("A", "2024-01-01", 1.0), tr("A", "2024-01-03", -1.0),
+              tr("B", "2024-01-02", -1.0), tr("B", "2024-01-04", 1.0)]
+    # chronological: +1, -1, -1, +1 -> max drawdown 2R (symbol order would also say 2; flip one)
+    assert summarize(trades)["max_dd_r"] == 2.0
+    trades[1] = tr("A", "2024-01-05", -1.0)  # chronological: +1, -1(B), +1(B), -1(A) -> DD 1R
+    assert summarize(trades)["max_dd_r"] == 1.0

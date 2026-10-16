@@ -147,51 +147,79 @@ def _to_date(value) -> Optional[date]:
 _EARNINGS_CACHE: dict[tuple[str, date], EarningsInfo] = {}
 
 
+FUND_TYPES = ("ETF", "INDEX", "MUTUALFUND", "CRYPTOCURRENCY", "FUTURE", "CURRENCY")
+
+
 def get_next_earnings(symbol: str, today: Optional[date] = None) -> EarningsInfo:
-    """Next earnings date for `symbol`, cached per calendar day."""
+    """Next earnings date for `symbol`.
+
+    Fails closed: "none" is only returned with positive evidence (an earnings
+    table without a future date, or a fund that has no earnings). yfinance
+    swallows HTTP errors and hands back empty results, which must not be read
+    as "no earnings coming". Known/none results are cached for the day;
+    "unknown" is retried on the next call.
+    """
     today = today or date.today()
     key = (symbol.upper(), today)
     if key in _EARNINGS_CACHE:
         return _EARNINGS_CACHE[key]
-
-    info = EarningsInfo("unknown")
-    lookup_ok = False
-    try:
-        ticker = _yf().Ticker(symbol)
-        try:
-            cal = ticker.calendar or {}
-            lookup_ok = True
-            dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
-            if dates is not None and not isinstance(dates, (list, tuple)):
-                dates = [dates]
-            future = sorted(d for d in (_to_date(x) for x in (dates or [])) if d and d >= today)
-            if future:
-                info = EarningsInfo("known", future[0])
-        except Exception as exc:
-            log.debug("calendar lookup failed for %s: %s", symbol, exc)
-
-        if info.status != "known":
-            try:
-                ed = ticker.get_earnings_dates(limit=8)
-                lookup_ok = True
-                if ed is not None and not ed.empty:
-                    future = sorted(d for d in (_to_date(x) for x in ed.index) if d and d >= today)
-                    if future:
-                        info = EarningsInfo("known", future[0])
-            except Exception as exc:
-                log.debug("earnings_dates lookup failed for %s: %s", symbol, exc)
-
-        if info.status != "known" and lookup_ok:
-            info = EarningsInfo("none")
-    except Exception as exc:
-        log.debug("earnings lookup failed for %s: %s", symbol, exc)
-
-    _EARNINGS_CACHE[key] = info
+    info = _lookup_earnings(symbol, today)
+    if info.status != "unknown":
+        _EARNINGS_CACHE[key] = info
     return info
 
 
+def _future(values, today: date) -> list[date]:
+    return sorted(d for d in (_to_date(x) for x in values) if d and d >= today)
+
+
+def _lookup_earnings(symbol: str, today: date) -> EarningsInfo:
+    try:
+        ticker = _yf().Ticker(symbol)
+    except Exception as exc:
+        log.debug("earnings lookup failed for %s: %s", symbol, type(exc).__name__)
+        return EarningsInfo("unknown")
+
+    no_future_evidence = False
+    try:
+        cal = ticker.calendar
+        if isinstance(cal, dict) and "Earnings Date" in cal:
+            dates = cal.get("Earnings Date")
+            dates = dates if isinstance(dates, (list, tuple)) else [dates]
+            fut = _future(dates, today)
+            if fut:
+                return EarningsInfo("known", fut[0])
+            if any(_to_date(x) for x in dates):  # only past dates listed
+                no_future_evidence = True
+    except Exception as exc:
+        log.debug("calendar lookup failed for %s: %s", symbol, type(exc).__name__)
+
+    try:
+        ed = ticker.get_earnings_dates(limit=12)
+        if ed is not None and not ed.empty:
+            fut = _future(ed.index, today)
+            if fut:
+                return EarningsInfo("known", fut[0])
+            no_future_evidence = True
+    except Exception as exc:
+        log.debug("earnings_dates lookup failed for %s: %s", symbol, type(exc).__name__)
+
+    if no_future_evidence:
+        return EarningsInfo("none")
+    try:
+        if (ticker.info or {}).get("quoteType") in FUND_TYPES:
+            return EarningsInfo("none")
+    except Exception as exc:
+        log.debug("quoteType lookup failed for %s: %s", symbol, type(exc).__name__)
+    return EarningsInfo("unknown")
+
+
 def fetch_fred(series_id: str, timeout: int = 15) -> Optional[pd.Series]:
-    """A FRED series as a date-indexed float Series (no API key needed)."""
+    """A FRED series as a date-indexed float Series (no API key needed).
+
+    Returns None on any failure, including a non-CSV response (FRED serves an
+    HTML page during maintenance), so a FRED outage never breaks a scan.
+    """
     import io
 
     import requests
@@ -201,13 +229,17 @@ def fetch_fred(series_id: str, timeout: int = 15) -> Optional[pd.Series]:
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text))
+        if df.shape[1] != 2 or df.empty:
+            raise ValueError(f"unexpected FRED response shape {df.shape}")
+        s = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+        s.index = pd.to_datetime(df.iloc[:, 0], errors="coerce")
+        s = s[s.index.notna()].dropna()
+        if s.empty:
+            raise ValueError("no numeric observations")
+        return s
     except Exception as exc:
-        log.warning("FRED %s unavailable: %s", series_id, exc)
+        log.warning("FRED %s unavailable: %s", series_id, type(exc).__name__)
         return None
-    df.columns = ["date", "value"]
-    s = pd.to_numeric(df["value"], errors="coerce")
-    s.index = pd.to_datetime(df["date"])
-    return s.dropna()
 
 
 def fetch_news(symbol: str, limit: int = 5) -> list[dict]:

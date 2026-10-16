@@ -5,9 +5,10 @@
     /brief                                  today's morning brief on demand
     /help
 
-The token comes from TELEGRAM_BOT_TOKEN. Set ALLOWED_CHAT_IDS to your chat id
-so strangers who find the bot can't use your API quota. (CallMeBot WhatsApp is
-send-only, so interactive questions go through Telegram.)
+The token comes from TELEGRAM_BOT_TOKEN. Access is deny-by-default: until
+ALLOWED_CHAT_IDS lists your chat id, the bot only answers /start (which tells
+you that id), so strangers can't read your portfolio or spend your Claude
+credits. (CallMeBot WhatsApp is send-only, so questions go through Telegram.)
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from .report import signal_message, split_message, to_telegram_html
 log = logging.getLogger("stockbot.bot")
 TICKER = re.compile(r"^\^?[A-Z][A-Z0-9.\-=]{0,9}$")
 CTX_TTL = 600  # seconds
+BRIEF_COOLDOWN = 600  # seconds between on-demand briefs
 
 HELP = (
     "*Stock bot*\n"
@@ -42,6 +44,8 @@ class BotState:
         self.ctx: Optional[scanner.Context] = None
         self.ctx_time = 0.0
         self.lock = asyncio.Lock()
+        self.brief_lock = asyncio.Lock()
+        self.last_brief = 0.0
 
     def context(self, symbols: list[str]) -> scanner.Context:
         if self.ctx is None or time.time() - self.ctx_time > CTX_TTL:
@@ -52,6 +56,11 @@ class BotState:
         return self.ctx
 
 
+def is_allowed(settings: config.Settings, chat_id) -> bool:
+    """Deny by default: only chats listed in ALLOWED_CHAT_IDS get answers."""
+    return str(chat_id) in settings.allowed_chat_ids
+
+
 def build_app(settings: config.Settings):
     from telegram import Update
     from telegram.constants import ParseMode
@@ -60,7 +69,7 @@ def build_app(settings: config.Settings):
     state = BotState(settings)
 
     def allowed(update: Update) -> bool:
-        return not settings.allowed_chat_ids or str(update.effective_chat.id) in settings.allowed_chat_ids
+        return is_allowed(settings, update.effective_chat.id)
 
     async def reply(update: Update, text: str) -> None:
         for chunk in split_message(text, 3500):
@@ -80,12 +89,14 @@ def build_app(settings: config.Settings):
                 await reply(update, signal_message(sig))
         except Exception as exc:
             log.exception("analyze %s failed", symbol)
-            await msg.edit_text(f"❌ Could not analyze {symbol}: {exc}")
+            await msg.edit_text(f"❌ Could not analyze {symbol} ({type(exc).__name__}).")
 
     async def start(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
         if not allowed(update):
+            await reply(update, f"👋 Your chat id is {chat_id}. Add it to ALLOWED_CHAT_IDS to use this bot.")
             return
-        await reply(update, f"👋 Your chat id is `{update.effective_chat.id}`.\n\n" + HELP)
+        await reply(update, f"👋 Your chat id is {chat_id}.\n\n" + HELP)
 
     async def help_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if allowed(update):
@@ -112,10 +123,21 @@ def build_app(settings: config.Settings):
     async def brief_cmd(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if not allowed(update):
             return
-        msg = await update.effective_message.reply_text("☕ Building today's brief (about a minute)…")
-        text = await asyncio.to_thread(brief_mod.build, settings)
-        await msg.delete()
-        await reply(update, text)
+        wait = BRIEF_COOLDOWN - (time.time() - state.last_brief)
+        if state.brief_lock.locked() or wait > 0:
+            await reply(update, f"⏳ A brief was just built – try again in {max(1, int(wait // 60))} min.")
+            return
+        async with state.brief_lock:
+            state.last_brief = time.time()
+            msg = await update.effective_message.reply_text("☕ Building today's brief (about a minute)…")
+            try:
+                text = await asyncio.to_thread(brief_mod.build, settings)
+            except Exception as exc:
+                log.exception("brief failed")
+                await msg.edit_text(f"❌ Brief failed ({type(exc).__name__}). Check the logs.")
+                return
+            await msg.delete()
+            await reply(update, text)
 
     async def text_msg(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if not allowed(update):
@@ -127,7 +149,7 @@ def build_app(settings: config.Settings):
             await reply(update, "Send a ticker like *NVDA*, or /help.")
 
     async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        log.error("update %s caused %s", update, context.error)
+        log.error("update failed: %s", type(context.error).__name__)
 
     app = Application.builder().token(settings.telegram_token).build()
     app.add_handler(CommandHandler("start", start))
@@ -142,12 +164,14 @@ def build_app(settings: config.Settings):
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for noisy in ("httpx", "httpcore", "telegram", "yfinance"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)  # httpx logs URLs containing the bot token
     settings = config.load()
     if not settings.telegram_token:
         print("Set TELEGRAM_BOT_TOKEN (from @BotFather) in your environment or .env file.")
         return 1
     if not settings.allowed_chat_ids:
-        log.warning("ALLOWED_CHAT_IDS is not set – anyone who finds the bot can use it")
+        log.warning("ALLOWED_CHAT_IDS is empty – the bot only answers /start until you add your chat id")
     build_app(settings).run_polling()
     return 0
 

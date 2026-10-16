@@ -96,8 +96,8 @@ class Regime:
 
 
 def _tnx_yield(close: pd.Series) -> pd.Series:
-    """^TNX has been quoted both as 42.5 and 4.25 over the years – normalise to percent."""
-    return close / 10.0 if close.dropna().median() > 20 else close
+    """^TNX has been quoted both as 42.5 and 4.25 over the years – normalise each value to percent."""
+    return close.where(close <= 20, close / 10.0)
 
 
 def regime_frame(
@@ -132,7 +132,12 @@ def regime_frame(
     out["c_panic"] = (out["vix_ratio"] > 1.0).fillna(False)
 
     if hy is not None and not hy.dropna().empty:
-        h = hy.reindex(idx).ffill()
+        # FRED publishes day D's spread on D+1: shift by one session so neither
+        # the live scan nor the backtest uses a value before it existed.
+        lagged = hy.dropna().copy()
+        lagged.index = pd.DatetimeIndex(lagged.index).normalize() + pd.offsets.BDay(1)
+        lagged = lagged[~lagged.index.duplicated(keep="last")]
+        h = lagged.reindex(idx.union(lagged.index)).ffill().reindex(idx)
         out["hy"] = h
         out["hy_chg"] = h - h.shift(p.macro_lookback)
     else:

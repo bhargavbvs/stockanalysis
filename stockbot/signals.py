@@ -3,7 +3,7 @@
 The old engine added up five criteria and fired at 4/5. Two of those
 ("ADX >= 20" and "no earnings") were effectively free points for *both*
 directions, so a stock without a bullish EMA stack could still score 4/5 and
-produce "BUY CALL". Here the logic is layered instead:
+produce a CALL signal. Here the logic is layered instead:
 
 GATES (all required; they decide direction)
   1. EMA stack       8 > 21 > 34 > 55 > 89      (PUT: reversed)
@@ -35,7 +35,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from . import indicators
+from . import indicators, marketcal
 from .data import EarningsInfo
 from .events import Event, blocking_event
 from .levels import Levels, find_levels
@@ -68,6 +68,9 @@ class StrategyParams:
     rsi_short: tuple[float, float] = (20.0, 60.0)
     near_extreme_pct: float = 20.0
     use_regime: bool = True
+    # An unverifiable earnings date blocks the trade (these are options buys;
+    # an unseen earnings print inside the hold is the IV-crush case).
+    block_unknown_earnings: bool = True
 
 
 @dataclass
@@ -106,11 +109,13 @@ class Signal:
     def headline(self) -> str:
         d = self.direction
         if self.status == SIGNAL:
-            return f"BUY {d} SIGNAL · {self.confidence} confidence"
+            return f"{d} SIGNAL – all rules met · {self.confidence} confidence"
         if self.status == SETUP:
             trend = "Uptrend" if d == "CALL" else "Downtrend"
             return f"{trend} – {d} setup forming ({self.triggers_met}/2 entry triggers)"
         if self.status == EARNINGS_BLOCK:
+            if self.earnings is not None and self.earnings.status == "unknown":
+                return f"{d} setup blocked – earnings date couldn't be verified"
             return f"{d} setup blocked – earnings inside the blackout window"
         if self.status == REGIME_BLOCK:
             return f"{d} setup blocked – market regime is DEFENSIVE"
@@ -317,8 +322,14 @@ def evaluate(
     partial_bar: bool = False,
     events: Optional[list[Event]] = None,
     sector: Optional[SectorState] = None,
+    sector_etf: Optional[str] = None,
 ) -> Signal:
-    """Evaluate the most recent bar of `df` (daily OHLCV)."""
+    """Evaluate the most recent bar of `df` (daily OHLCV).
+
+    `sector` drives the sector guard; `sector_etf` (defaults to sector.etf)
+    scopes sector events such as bellwether earnings, so that veto still works
+    when the guard is off or the ETF's history is missing.
+    """
     symbol = symbol.upper()
     today = today or date.today()
     if df is None or len(df) < MIN_BARS:
@@ -337,12 +348,15 @@ def evaluate(
         return s
 
     e_within = earnings.within(today, p.earnings_days) if earnings else None
-    event = blocking_event(events or [], today, symbol, sector.etf if sector else None)
+    e_unknown = earnings is not None and earnings.status == "unknown"
+    etf = sector_etf or (sector.etf if sector else None)
+    event = blocking_event(events or [], today, symbol, etf)
+    regime_on = p.use_regime and regime is not None and regime.available
     cls = classify(
         c, p,
-        earnings_block=_last(e_within is True),
-        earnings_unknown=_last(earnings is not None and earnings.status == "unknown"),
-        risk_off=_last(regime.risk_off if (regime and regime.available) else False),
+        earnings_block=_last(e_within is True or (e_unknown and p.block_unknown_earnings)),
+        earnings_unknown=_last(e_unknown),
+        risk_off=_last(regime.risk_off if regime_on else False),
         event_block=_last(event is not None),
         sector_block=_last(sector is not None and sector.blocks_calls),
     ).iloc[-1]
@@ -369,19 +383,25 @@ def evaluate(
 
     if partial_bar:
         sig.warnings.append("intraday: today's bar is not closed yet, the signal can change by the close")
-    if earnings is not None and earnings.status == "unknown":
+    if e_unknown and not p.block_unknown_earnings:
         sig.warnings.append("earnings date could not be checked – confidence reduced one level")
     if pd.isna(row.get("ema_200")):
         sig.warnings.append("less than 200 bars of history – 200 EMA checks unavailable")
     if regime is not None and not regime.available:
         sig.warnings.append("market regime data unavailable – regime gate skipped")
 
-    if regime is not None and regime.available and regime.mode == CAUTION and direction == "CALL":
+    if regime_on and regime.mode == CAUTION and direction == "CALL":
         sig.warnings.append(f"market regime CAUTION ({regime.score}/5) – half size")
 
     if sig.status == SIGNAL:
-        mult = regime.size_multiplier if (regime is not None and regime.available and direction == "CALL") else 1.0
-        sig.plan = build_plan(ind, direction, risk, sig.levels, account_size, risk_pct * max(mult, 0.0))
+        mult = regime.size_multiplier if (regime_on and direction == "CALL") else 1.0
+        exit_by = None
+        if earnings is not None and earnings.status == "known" and earnings.next_date:
+            # leave before earnings if they land inside the max hold
+            horizon = (pd.Timestamp(today) + marketcal.SESSION * (risk.max_hold_bars + 1)).date()
+            if earnings.next_date <= horizon:
+                exit_by = marketcal.prev_session(earnings.next_date)
+        sig.plan = build_plan(ind, direction, risk, sig.levels, account_size, risk_pct * max(mult, 0.0), exit_by)
         if mult < 1.0 and sig.plan.risk_dollars is not None:
             sig.plan.notes.append(f"position size cut to {mult:.0%} by market regime")
     return sig
