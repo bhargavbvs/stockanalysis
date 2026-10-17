@@ -1,4 +1,0 @@
-# Procfile for Stock Tracker Service
-# Use this for the stock-tracker Railway service
-
-worker: python stock_tracker.py
