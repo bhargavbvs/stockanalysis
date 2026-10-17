@@ -131,13 +131,14 @@ def build_app(settings: config.Settings):
             state.last_brief = time.time()
             msg = await update.effective_message.reply_text("☕ Building today's brief (about a minute)…")
             try:
-                text = await asyncio.to_thread(brief_mod.build, settings)
+                parts = await asyncio.to_thread(brief_mod.build_messages, settings)
             except Exception as exc:
                 log.exception("brief failed")
                 await msg.edit_text(f"❌ Brief failed ({type(exc).__name__}). Check the logs.")
                 return
             await msg.delete()
-            await reply(update, text)
+            for text in parts:
+                await reply(update, text)
 
     async def text_msg(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         if not allowed(update):

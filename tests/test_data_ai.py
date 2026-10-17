@@ -168,9 +168,11 @@ def test_ai_take_accumulates_pause_turn_and_keeps_sources(monkeypatch):
         _blk("text", text="\n*Lesson of the day*\nSpreads matter.", citations=[_cite("https://cnbc.com/y")])])
     msgs = _install_fake_anthropic(monkeypatch, [first, second])
     s = config.Settings(anthropic_api_key="k")
-    text = brief.ai_take(_brief_data(), s)
+    ai = brief.ai_take(_brief_data(), s)
+    text = ai.news
     assert text.startswith("*What's moving markets*") and "Let me search" not in text
     assert "_Sources: reuters.com, cnbc.com_" in text
+    assert ai.stocks is None  # no marker -> everything is news
     # the continuation resent the paused assistant blocks unchanged
     cont = msgs.calls[1]["messages"]
     assert cont[1]["role"] == "assistant" and cont[1]["content"] == first.content
@@ -250,3 +252,15 @@ def test_tzdata_and_requirements_pins():
 
     reqs = Path("requirements.txt").read_text()
     assert "tzdata" in reqs and "yfinance>=" in reqs and "<" in reqs
+
+
+def test_ai_take_splits_news_and_stocks_with_their_own_sources(monkeypatch):
+    resp = types.SimpleNamespace(stop_reason="end_turn", content=[
+        _blk("text", text="*What's moving markets*\n• Chips fell", citations=[_cite("https://www.reuters.com/x")]),
+        _blk("text", text="\n*Lesson of the day*\nSpreads matter.\n*===STOCKS===*\n"),
+        _blk("text", text="*SNXX*\n• Why it moved: China memory news", citations=[_cite("https://cnbc.com/y")])])
+    msgs = _install_fake_anthropic(monkeypatch, [resp])
+    ai = brief.ai_take(_brief_data(), config.Settings(anthropic_api_key="k"))
+    assert "STOCKS" not in ai.news and ai.news.endswith("_Sources: reuters.com_")
+    assert ai.stocks.startswith("*SNXX*") and ai.stocks.endswith("_Sources: cnbc.com_")
+    assert "===STOCKS===" in msgs.calls[0]["system"] and "Washington & the Fed" in msgs.calls[0]["system"]

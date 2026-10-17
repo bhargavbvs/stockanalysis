@@ -73,6 +73,7 @@ class Tracker:
         self.state = self._load_state()
         self._last_error_notice: Optional[datetime] = None
         self._brief_attempts: dict[str, list[datetime]] = {}
+        self.brief_gap_seconds = 5
 
     # ----------------------------------------------------------------- state
     def _load_state(self) -> dict:
@@ -174,13 +175,33 @@ class Tracker:
         return len(tries) < 3 and (not tries or now - tries[-1] >= timedelta(minutes=20))
 
     def send_brief(self, now: Optional[datetime] = None) -> str:
+        """Send the brief (news, then stocks). A retry only sends the parts that didn't go out."""
         now = now or datetime.now(ZoneInfo(self.s.brief_tz))
-        text = brief_mod.build(self.s, now)
-        if not self.deliver(text, f"Morning brief {now:%b %d}"):
-            raise RuntimeError("no channel delivered the brief")
-        self.state["last_brief"] = now.astimezone(ZoneInfo(self.s.brief_tz)).date().isoformat()
+        day = now.astimezone(ZoneInfo(self.s.brief_tz)).date().isoformat()
+        msgs = brief_mod.build_messages(self.s, now)
+        if self.dry_run:
+            for text in msgs:
+                self.deliver(text, "Brief")
+            return "\n\n".join(msgs)
+        done = self.state.get("brief_parts") or {}
+        same = done.get("day") == day and done.get("count") == len(msgs)
+        sent = set(done.get("sent", [])) if same else set()
+        names = ["Market news", "Your stocks"] if len(msgs) == 2 else ["Morning brief"] * len(msgs)
+        for i, text in enumerate(msgs):
+            if i in sent:
+                continue
+            if sent and self.brief_gap_seconds:
+                time.sleep(self.brief_gap_seconds)  # keep WhatsApp delivery in order
+            if not self.deliver(text, f"{names[i]} {now:%b %d}"):
+                break  # don't let the stocks message arrive before the news
+            sent.add(i)
+            self.state["brief_parts"] = {"day": day, "count": len(msgs), "sent": sorted(sent)}
+            self._save_state()
+        if len(sent) < len(msgs):
+            raise RuntimeError(f"{len(msgs) - len(sent)} of {len(msgs)} brief messages were not delivered")
+        self.state["last_brief"] = day
         self._save_state()
-        return text
+        return "\n\n".join(msgs)
 
     # ------------------------------------------------------------------ loop
     def _job(self, name: str, fn, *args) -> None:

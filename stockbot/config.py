@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .leverage import DEFAULT_LEVERAGED, LeveragedETF, parse_leveraged
+from .options import OptionHolding, parse_options
 from .regime import RegimeParams
 from .risk import RiskParams
 from .signals import CONFIDENCE, StrategyParams
@@ -94,6 +96,8 @@ class Settings:
     # Scanning
     watchlist: list[str] = field(default_factory=list)
     portfolio: list[Holding] = field(default_factory=list)
+    options: list[OptionHolding] = field(default_factory=list)
+    leveraged: dict[str, LeveragedETF] = field(default_factory=lambda: dict(DEFAULT_LEVERAGED))
     scan_interval_minutes: int = 30
     min_confidence: str = "MODERATE"
     alert_cooldown_hours: float = 24.0
@@ -111,7 +115,9 @@ class Settings:
     anthropic_api_key: str = ""
     brief_model: str = "claude-sonnet-5-5"
     brief_language: str = "English"
-    brief_max_searches: int = 5
+    brief_max_searches: int = 8
+    brief_split: bool = True  # news and stocks as two separate messages
+    brief_deep_stocks: int = 6  # holdings that get the full fundamentals/analyst block
     # Sizing (optional)
     account_size: Optional[float] = None
     risk_pct: float = 1.0
@@ -131,6 +137,11 @@ class Settings:
     @property
     def portfolio_symbols(self) -> list[str]:
         return [h.symbol for h in self.portfolio]
+
+    def underlying(self, symbol: str) -> str:
+        """The company behind a leveraged ETF (SNXX -> SNDK); the symbol itself otherwise."""
+        lev = self.leveraged.get(symbol.upper())
+        return lev.underlying if lev else symbol.upper()
 
     @property
     def scan_symbols(self) -> list[str]:
@@ -193,6 +204,8 @@ def load(env_file: Optional[str] = ".env") -> Settings:
         email_recipient=_env("EMAIL_RECIPIENT"),
         watchlist=[s.strip().upper() for s in _env("WATCHLIST", DEFAULT_WATCHLIST).split(",") if s.strip()],
         portfolio=parse_portfolio(_env("PORTFOLIO")),
+        options=parse_options(_env("OPTIONS")),
+        leveraged=parse_leveraged(_env("LEVERAGED_ETFS")),
         scan_interval_minutes=_int("SCAN_INTERVAL_MINUTES", 30),
         min_confidence=min_conf,
         alert_cooldown_hours=_float("ALERT_COOLDOWN_HOURS", 24.0),
@@ -209,7 +222,9 @@ def load(env_file: Optional[str] = ".env") -> Settings:
         anthropic_api_key=_env("ANTHROPIC_API_KEY"),
         brief_model=_env("BRIEF_MODEL", "claude-sonnet-5-5"),
         brief_language=_env("BRIEF_LANGUAGE", "English"),
-        brief_max_searches=_int("BRIEF_MAX_SEARCHES", 5),
+        brief_max_searches=_int("BRIEF_MAX_SEARCHES", 8),
+        brief_split=_bool("BRIEF_SPLIT", True),
+        brief_deep_stocks=_int("BRIEF_DEEP_STOCKS", 6),
         account_size=_float("ACCOUNT_SIZE", None),
         risk_pct=_float("RISK_PER_TRADE_PCT", 1.0),
         strategy=StrategyParams(

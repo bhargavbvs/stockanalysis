@@ -160,7 +160,7 @@ def test_brief_due_window_and_retries(tmp_path):
 
 def test_failed_delivery_is_not_recorded(tmp_path, monkeypatch):
     t = Tracker(_settings(data_dir=tmp_path))  # no channels configured -> nothing delivered
-    monkeypatch.setattr(brief, "build", lambda s, now=None: "brief text")
+    monkeypatch.setattr(brief, "build_messages", lambda s, now=None: ["news", "stocks"])
     with pytest.raises(RuntimeError):
         t.send_brief(datetime(2026, 10, 16, 6, 0, tzinfo=PT))
     assert t.state["last_brief"] is None
@@ -211,6 +211,8 @@ def fake_network(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "fetch_fred", lambda sid, timeout=15: pd.Series(3.0, index=idx))
     monkeypatch.setattr(data, "get_next_earnings", lambda s, today=None: EarningsInfo("known", idx[-1].date() + timedelta(days=40)))
     monkeypatch.setattr(data, "fetch_news", lambda s, limit=5: [{"title": f"{s} headline", "publisher": "Reuters"}])
+    monkeypatch.setattr(data, "fetch_fundamentals", lambda s, today=None: None)
+    monkeypatch.setattr(data, "fetch_option_quote", lambda *a: None)
     monkeypatch.setattr(sector.SectorMap, "_lookup", staticmethod(lambda s: ({"NVDA": "SOXX"}.get(s, "XLK"), True)))
     now = datetime.combine(idx[-1].date(), datetime.min.time(), tzinfo=ET).replace(hour=17)
     monkeypatch.setattr(scanner, "datetime", type("D", (), {"now": staticmethod(lambda tz=None: now)}))

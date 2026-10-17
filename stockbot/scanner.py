@@ -43,6 +43,24 @@ def market_is_open(now: Optional[datetime] = None) -> bool:
         hour=ch, minute=cm, second=0, microsecond=0)
 
 
+def _under(settings, symbol: str) -> str:
+    """Leveraged ETFs are judged on the company behind them (SNXX -> SNDK) for earnings and sector."""
+    fn = getattr(settings, "underlying", None)
+    return fn(symbol) if fn else symbol
+
+
+def _inverse(settings, symbol: str) -> bool:
+    fund = getattr(settings, "leveraged", {}).get(symbol.upper())
+    return fund is not None and fund.factor < 0
+
+
+def sector_for(settings, smap: sec.SectorMap, symbol: str) -> Optional[str]:
+    """Sector ETF: an explicit SECTOR_OVERRIDES entry wins, else the company behind a leveraged ETF."""
+    if symbol.upper() in smap.overrides:
+        return smap.get(symbol)
+    return smap.get(_under(settings, symbol))
+
+
 def _drop_partial(history: dict[str, pd.DataFrame], today: date) -> dict[str, pd.DataFrame]:
     return {k: (v[v.index.date < today] if not v.empty else v) for k, v in history.items()}
 
@@ -65,7 +83,7 @@ def build_context(settings, symbols: Iterable[str], now: Optional[datetime] = No
     # Sector ETFs are always mapped (they scope bellwether-earnings vetoes);
     # SECTOR_GUARD only decides whether an overheated sector blocks CALLs.
     smap = sec.SectorMap(settings.data_dir / "sectors.json", settings.sector_overrides)
-    sectors = {s: smap.get(s) for s in symbols}
+    sectors = {s: sector_for(settings, smap, s) for s in symbols}
     etfs = sorted({e for e in sectors.values() if e}) if settings.sector_guard else []
 
     wanted = [s for s in list(dict.fromkeys(symbols + etfs)) if s not in market]
@@ -90,7 +108,7 @@ def ensure_symbols(ctx: Context, settings, symbols: Iterable[str]) -> None:
         return
     smap = sec.SectorMap(settings.data_dir / "sectors.json", settings.sector_overrides)
     for s in new:
-        ctx.sectors[s] = smap.get(s)
+        ctx.sectors[s] = sector_for(settings, smap, s)
     etfs = ({ctx.sectors.get(s) for s in new} - {None} - set(ctx.sector_states)) if settings.sector_guard else set()
     ctx.history.update(data.fetch_history(new + sorted(etfs)))
     for etf in etfs:
@@ -103,7 +121,9 @@ def analyze(symbol: str, ctx: Context, settings, force_earnings: bool = False) -
     sym = symbol.upper()
     df = ctx.history.get(sym)
     etf = ctx.sectors.get(sym)
-    state = ctx.sector_states.get(etf) if etf else None
+    # The guard blocks CALLs in an overheated/breaking sector. For an inverse fund a CALL is a bet *against*
+    # that sector, so the guard doesn't apply (the ETF still scopes bellwether-earnings vetoes).
+    state = ctx.sector_states.get(etf) if etf and not _inverse(settings, sym) else None
     kwargs = dict(
         p=settings.strategy, regime=ctx.regime, risk=settings.risk, account_size=settings.account_size,
         risk_pct=settings.risk_pct, today=ctx.today, partial_bar=ctx.partial_bar, events=ctx.events, sector=state,
@@ -111,7 +131,7 @@ def analyze(symbol: str, ctx: Context, settings, force_earnings: bool = False) -
     )
     sig = evaluate(sym, df, **kwargs)
     if force_earnings or sig.direction is not None:
-        sig = evaluate(sym, df, earnings=data.get_next_earnings(sym, ctx.today), **kwargs)
+        sig = evaluate(sym, df, earnings=data.get_next_earnings(_under(settings, sym), ctx.today), **kwargs)
     return sig
 
 

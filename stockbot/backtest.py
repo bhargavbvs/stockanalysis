@@ -29,7 +29,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from . import config, data, indicators, regime as rg, sector as sec
+from . import config, data, indicators, regime as rg, scanner, sector as sec
 from .risk import RiskParams, stop_distance
 from .signals import CONFIDENCE, SIGNAL, StrategyParams, classify, criteria
 
@@ -267,10 +267,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     market = data.fetch_history(rg.MARKET_SYMBOLS, period=args.period)
     hy = data.fetch_fred(rg.HY_SERIES)
     rframe = rg.regime_frame(market, hy, s.regime)
-    earnings = {sym: data.get_earnings_history(sym) for sym in hist}
+    earnings = {sym: data.get_earnings_history(s.underlying(sym)) for sym in hist}
     missing_e = [k for k, v in earnings.items() if not v]
     smap = sec.SectorMap(s.data_dir / "sectors.json", s.sector_overrides)
-    sector_of = {sym: smap.get(sym) for sym in hist}
+    sector_of = {sym: None if s.leveraged.get(sym) and s.leveraged[sym].factor < 0
+                 else scanner.sector_for(s, smap, sym) for sym in hist}
     sectors = data.fetch_history(sorted({e for e in sector_of.values() if e}), period=args.period)
 
     variants = VARIANTS if args.compare else [VARIANTS[-1]]

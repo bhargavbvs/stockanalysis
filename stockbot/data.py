@@ -12,6 +12,7 @@ Two fixes over the old code live here:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -266,6 +267,148 @@ def fetch_news(symbol: str, limit: int = 5) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+@dataclass
+class Fundamentals:
+    """Company facts for the brief. Every field is optional; Yahoo leaves gaps."""
+
+    symbol: str
+    name: Optional[str] = None
+    revenue_growth: Optional[float] = None  # latest quarter vs a year earlier, %
+    net_margin: Optional[float] = None  # latest quarter, % (falls back to trailing 12 months)
+    pe: Optional[float] = None
+    forward_pe: Optional[float] = None
+    buy: Optional[int] = None
+    hold: Optional[int] = None
+    sell: Optional[int] = None
+    analysts: Optional[int] = None
+    target_mean: Optional[float] = None
+    target_low: Optional[float] = None
+    target_high: Optional[float] = None
+
+    def lines(self, price: Optional[float], label: str = "") -> list[str]:
+        who = f"{label}: " if label else ""
+        biz = []
+        if self.revenue_growth is not None:
+            biz.append(f"revenue {self.revenue_growth:+.0f}% y/y")
+        if self.net_margin is not None:
+            biz.append(f"net margin {self.net_margin:.0f}%")
+        if self.pe is not None and self.pe > 0:
+            biz.append(f"P/E {self.pe:.0f}" + (f" (fwd {self.forward_pe:.0f})" if self.forward_pe and self.forward_pe > 0 else ""))
+        elif self.pe is None and self.net_margin is not None and self.net_margin < 0:
+            biz.append("not profitable yet")
+        out = [f"{who}" + " · ".join(biz)] if biz else []
+        street = []
+        if self.buy is not None:
+            street.append(f"{self.buy} Buy / {self.hold or 0} Hold / {self.sell or 0} Sell")
+        elif self.analysts:
+            street.append(f"{self.analysts} analysts")
+        if self.target_mean:
+            up = f" ({(self.target_mean / price - 1) * 100:+.0f}%)" if price else ""
+            rng = (f", range ${self.target_low:,.0f}–{self.target_high:,.0f}"
+                   if self.target_low and self.target_high else "")
+            street.append(f"avg target ${self.target_mean:,.2f}{up}{rng}")
+        if street:
+            out.append("Analysts: " + " · ".join(street))
+        return out
+
+
+def _num(v) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(f) or math.isinf(f) else f
+
+
+def _row(df: pd.DataFrame, *names: str) -> Optional[pd.Series]:
+    for n in names:
+        if n in df.index:
+            return pd.to_numeric(df.loc[n], errors="coerce")
+    return None
+
+
+_FUND_CACHE: dict[tuple[str, date], Optional[Fundamentals]] = {}
+
+
+def fetch_fundamentals(symbol: str, today: Optional[date] = None) -> Optional[Fundamentals]:
+    """Growth, margin, valuation and analyst consensus from Yahoo. None if nothing came back."""
+    key = (symbol.upper(), today or date.today())
+    if key in _FUND_CACHE:
+        return _FUND_CACHE[key]
+    try:
+        t = _yf().Ticker(symbol)
+    except Exception as exc:
+        log.debug("fundamentals unavailable for %s: %s", symbol, type(exc).__name__)
+        return None
+    f = Fundamentals(symbol.upper())
+    try:
+        info = t.info or {}
+    except Exception:
+        info = {}
+    if info.get("quoteType") in FUND_TYPES:
+        return None
+    f.name = info.get("shortName")
+    f.pe, f.forward_pe = _num(info.get("trailingPE")), _num(info.get("forwardPE"))
+    g, m = _num(info.get("revenueGrowth")), _num(info.get("profitMargins"))
+    f.revenue_growth = None if g is None else g * 100
+    f.net_margin = None if m is None else m * 100
+    f.analysts = int(info["numberOfAnalystOpinions"]) if _num(info.get("numberOfAnalystOpinions")) else None
+    f.target_mean, f.target_low, f.target_high = (_num(info.get(k)) for k in
+                                                   ("targetMeanPrice", "targetLowPrice", "targetHighPrice"))
+    try:  # the latest quarter beats Yahoo's trailing figures for fast movers
+        q = t.quarterly_income_stmt
+        if q is not None and not q.empty:
+            q = q.reindex(sorted(q.columns, reverse=True), axis=1)
+            rev, ni = _row(q, "Total Revenue", "Operating Revenue"), _row(q, "Net Income", "Net Income Common Stockholders")
+            if rev is not None and len(rev.dropna()) and rev.iloc[0] and rev.iloc[0] > 0:
+                latest = pd.Timestamp(rev.index[0])
+                for col, val in rev.iloc[1:].items():  # the quarter ~1 year earlier, matched by date
+                    if 350 <= (latest - pd.Timestamp(col)).days <= 380 and val and val > 0:
+                        f.revenue_growth = (rev.iloc[0] / val - 1) * 100
+                        break
+                if ni is not None and _num(ni.iloc[0]) is not None:
+                    f.net_margin = ni.iloc[0] / rev.iloc[0] * 100
+    except Exception as exc:
+        log.debug("income statement unavailable for %s: %s", symbol, type(exc).__name__)
+    try:
+        rec = t.recommendations
+        if rec is not None and not rec.empty:
+            row = rec[rec["period"] == "0m"].iloc[0] if "period" in rec and (rec["period"] == "0m").any() else rec.iloc[0]
+            g_ = lambda k: int(_num(row.get(k)) or 0)  # noqa: E731
+            f.buy, f.hold, f.sell = g_("strongBuy") + g_("buy"), g_("hold"), g_("sell") + g_("strongSell")
+            if not (f.buy or f.hold or f.sell):
+                f.buy = f.hold = f.sell = None
+    except Exception as exc:
+        log.debug("recommendations unavailable for %s: %s", symbol, type(exc).__name__)
+    empty = all(getattr(f, k) is None for k in ("revenue_growth", "net_margin", "pe", "buy", "target_mean"))
+    out = None if empty else f
+    if out is not None:
+        _FUND_CACHE[key] = out
+    return out
+
+
+def fetch_option_quote(underlying: str, expiry: date, strike: float, right: str):
+    """Yahoo quote for one contract -> options.OptionQuote, or None."""
+    from .options import OptionQuote
+
+    try:
+        t = _yf().Ticker(underlying)
+        exp = expiry.isoformat()
+        if exp not in (t.options or ()):
+            log.warning("%s has no %s expiry on Yahoo", underlying, exp)
+            return None
+        chain = t.option_chain(exp)
+        table = chain.calls if right == "C" else chain.puts
+        row = table[(table["strike"] - strike).abs() < 1e-6]
+        if row.empty:
+            return None
+        r = row.iloc[0]
+        return OptionQuote(_num(r.get("bid")), _num(r.get("ask")), _num(r.get("lastPrice")), _num(r.get("impliedVolatility")))
+    except Exception as exc:
+        log.debug("option quote unavailable for %s %s %s%s: %s", underlying, expiry, strike, right, type(exc).__name__)
+        return None
 
 
 def get_earnings_history(symbol: str, limit: int = 60) -> Optional[list[date]]:

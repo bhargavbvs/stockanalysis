@@ -1,6 +1,9 @@
 # Stock Signal Bot
 
-Scans US stocks for Fibonacci-EMA pullback setups (The Tao of Trading style), checks them against the market regime, the economic calendar, earnings and the stock's sector, and sends alerts to **WhatsApp** (and/or Telegram, Discord, email, webhook). Every morning it sends a **brief**: market mood, what's coming up this week, what your stocks are doing, and an optional AI-written section on today's news, possible scenarios and a lesson of the day.
+Scans US stocks for Fibonacci-EMA pullback setups (The Tao of Trading style), checks them against the market regime, the economic calendar, earnings and the stock's sector, and sends alerts to **WhatsApp** (and/or Telegram, Discord, email, webhook). Every morning it sends a **brief as two messages**:
+
+1. **Market news** – market mood, futures/VIX/yields/oil, the next two weeks of events, and (optional, AI with web search) what moved markets, what Washington and the Fed are doing including rate-hike odds, what the pros say, scenarios and a lesson of the day.
+2. **Your stocks** – portfolio totals; your largest holdings in depth (rules status, revenue growth, margin, P/E, analyst ratings and targets, levels, earnings); leveraged ETFs explained through the company behind them with the decay math ("SNXX needs +101% – SanDisk +42% in a straight line, ~+60% over 3 months of normal swings"); your option positions (value, days left, time decay per day, the price that beats selling today and the price that gets your cost back); and per-stock news with bull and bear cases (AI).
 
 > Educational tool, not financial advice. Results are on the underlying stock; options add strike, expiry and volatility risk.
 
@@ -62,10 +65,14 @@ Twilio is also supported (`WHATSAPP_PROVIDER=twilio`). WhatsApp only allows free
 Create a bot with @BotFather and set `TELEGRAM_BOT_TOKEN`. Send `/start` to it to see your chat id, then set `TELEGRAM_CHAT_ID` and `ALLOWED_CHAT_IDS`. The interactive bot is deny-by-default: until your chat id is in `ALLOWED_CHAT_IDS` it only answers `/start`, so strangers can't see your portfolio or spend your Claude credits.
 
 ### 3. AI section of the brief (optional)
-Set `ANTHROPIC_API_KEY` (from console.anthropic.com). Each brief makes one Claude call with up to `BRIEF_MAX_SEARCHES` web searches, which costs roughly $0.10–0.20 with the default `claude-sonnet-5-5`. Without a key the brief still has everything except the news, scenarios and lesson.
+Set `ANTHROPIC_API_KEY` (from console.anthropic.com). Each brief makes one Claude call with up to `BRIEF_MAX_SEARCHES` (default 8) web searches, which costs roughly $0.15–0.30 with the default `claude-sonnet-5-5`. Without a key the brief still has everything except the news write-up, the per-stock news and the lesson.
 
-### 4. Your stocks
+### 4. Your stocks and options
 `PORTFOLIO=NVDA:20@95,MSFT:5@410,TSLA` sets ticker, shares and average cost; shares and cost are optional. `WATCHLIST=…` holds the extra symbols to scan.
+
+`OPTIONS=APLD:2027-01-15:25C:20@6.897` lists option positions as underlying, expiry, strike with C or P, contracts, and the per-share price you paid (the number Robinhood shows). Quotes come from Yahoo's option chain; delta, time decay and odds use Black-Scholes with the quoted implied volatility. Each position shows two break-even prices: **beats selling today** (strike + today's price – what holding from here has to clear) and **your cost back** (strike + what you paid).
+
+Leveraged and inverse ETFs (`SNXX`→SanDisk, `APLX`→Applied Digital, `TQQQ`, …; add your own with `LEVERAGED_ETFS=ETF:UNDERLYING:FACTOR`) use the company's earnings date for the blackout and its sector for the sector guard. Without this, a 2x single-stock fund has no earnings date of its own and would never be blocked before the company reports.
 
 All options are documented in [`.env.example`](.env.example).
 
@@ -133,7 +140,9 @@ stockbot/
   levels.py           support / resistance from swing pivots
   data.py             batched Yahoo download, earnings dates, FRED, news
   scanner.py          builds the shared context and evaluates symbols
-  brief.py            morning brief (+ optional Claude/web-search section)
+  brief.py            morning brief: news message + stocks message (+ optional Claude/web search)
+  leverage.py         leveraged-ETF map and decay / recovery math
+  options.py          option positions: quotes, Black-Scholes delta/decay, break-evens
   report.py           message formatting (WhatsApp / Telegram HTML / Discord / plain)
   alerts.py           delivery channels
   tracker.py          scheduler, alert de-duplication, CLI
